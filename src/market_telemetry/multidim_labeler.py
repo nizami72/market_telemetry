@@ -40,7 +40,7 @@ def make_impulse_time_machine():
     # ==========================================
     # ⚡ ИМПУЛЬСНАЯ РАЗМЕТКА И ФИЛЬТР ШУМА
     # ==========================================
-    look_ahead = 18  # 3 минуты вперед
+    look_ahead = 90  # 3 минуты вперед
     df["future_price"] = df["price"].shift(-look_ahead)
 
     # Считаем чистое изменение цены в долларах
@@ -48,7 +48,7 @@ def make_impulse_time_machine():
 
     # ПОРОГ ФИЛЬТРАЦИИ ШУМА (в долларах для BTC)
     # Если за 3 минуты цена прошла меньше $15 — это рыночный шум
-    noise_threshold = 15.0
+    noise_threshold = 40.0
 
     # Задаем условия: 1 - рост, 0 - падение, -1 - шум/флэт
     conditions = [
@@ -78,10 +78,9 @@ def make_impulse_time_machine():
     ready_file = "multidim_labeled_market_data.csv"
     df_filtered.to_csv(ready_file, index=False)
 
-    print(f"🎉 Новая импульсная разметка завершена!")
-    print(f"🗑️ Было строк до фильтрации: {len(df_cleaned)}")
-    print(
-        f"🎯 Осталось качественных импульсов для ИИ: {len(df_filtered)} (Выброшен шум и сделано разрежение)"
+    print(f"🎉 Новая импульсная разметка завершена, выброшен шум и сделано разрежение!")
+    print(f"🗑️ Было строк до фильтрации:                                        {len(df_cleaned)}")
+    print(f"🎯 Осталось качественных импульсов для ИИ:                          {len(df_filtered)}"
     )
 
 
