@@ -21,13 +21,45 @@ def make_impulse_time_machine():
     df = df.sort_values("timestamp").reset_index(drop=True)
 
     # ==========================================
+    # 📡 СИНХРОНИЗАЦИЯ СЕТКИ ВРЕМЕНИ И ЛЕЧЕНИЕ ГЭПОВ
+    # ==========================================
+    print("⚙️ Выравниваю временную сетку (шаг 10с) и лечу сетевые дыры...")
+
+    # Устанавливаем timestamp как индекс для работы с временными рядами
+    df = df.set_index("timestamp")
+
+    # Удаляем дубликаты индексов, если они случайно появились при сбоях
+    df = df[~df.index.duplicated(keep='first')]
+
+    # Создаем идеальную сетку с шагом 10 секунд
+    # Все пропущенные отметки времени создадут новые пустые строки (NaN)
+    df = df.resample("10s").asfreq()
+
+    # Лечим пропуски:
+    # 1. Цену (price) копируем вперед из последней известной точки (рынок стоял для нас)
+    df["price"] = df["price"].ffill()
+
+    # 2. Стаканы (imbalance) тоже берем из последнего известного состояния
+    imb_cols = ["imbalance_5", "imbalance_20", "imbalance_50"]
+    df[imb_cols] = df[imb_cols].ffill()
+
+    # 3. Скорость и Дельту приравниваем к 0 (в моменты сбоя активности не было)
+    df["trade_speed_10s"] = df["trade_speed_10s"].fillna(0.0)
+    df["market_delta_10s"] = df["market_delta_10s"].fillna(0.0)
+
+    # Возвращаем timestamp обратно в колонки и сбрасываем индекс
+    df = df.reset_index()
+    # ==========================================
+
+
+    # ==========================================
     # 🧪 FEATURE ENGINEERING (КОНТЕКСТ)
     # ==========================================
     rolling_speed_mean = df["trade_speed_10s"].rolling(window=30, min_periods=5).mean()
     rolling_speed_std = df["trade_speed_10s"].rolling(window=30, min_periods=5).std()
-    df["speed_zscore"] = (
-            (df["trade_speed_10s"] - rolling_speed_mean) / rolling_speed_std
-    ).fillna(0)
+   # Безопасный расчет Z-Score
+    df["speed_zscore"] = ((df["trade_speed_10s"] - rolling_speed_mean) / rolling_speed_std)
+    df["speed_zscore"] = df["speed_zscore"].replace([np.inf, -np.inf], np.nan).fillna(0.0)
 
     df["delta_rolling_2m"] = (
         df["market_delta_10s"].rolling(window=12, min_periods=3).sum().fillna(0)
@@ -48,7 +80,7 @@ def make_impulse_time_machine():
 
     # ПОРОГ ФИЛЬТРАЦИИ ШУМА (в долларах для BTC)
     # Если за 3 минуты цена прошла меньше $15 — это рыночный шум
-    noise_threshold = 40.0
+    noise_threshold = 20.0
 
     # Задаем условия: 1 - рост, 0 - падение, -1 - шум/флэт
     conditions = [
