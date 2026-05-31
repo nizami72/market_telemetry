@@ -103,7 +103,7 @@ def make_impulse_time_machine():
     df_filtered = df_filtered.drop(columns=["future_price", "price_change"])
 
     # Сохраняем новую качественную матрицу
-    ready_file = "multidim_labeled_market_data.csv"
+    ready_file = "../../data/multidim_labeled_market_data.csv"
     df_filtered.to_csv(ready_file, index=False)
 
     print(f"🎉 Новая импульсная разметка завершена, произведено разрежение сетки!")

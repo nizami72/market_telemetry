@@ -10,7 +10,7 @@ from sklearn.metrics import log_loss, roc_auc_score
 warnings.filterwarnings('ignore', category=UserWarning)
 
 def train_lgbm():
-    csv_file = "multidim_labeled_market_data.csv"
+    csv_file = "../../data/multidim_labeled_market_data.csv"
     print(f"📖 Загружаю датасет {csv_file} для LightGBM...")
     df = pd.read_csv(csv_file)
 

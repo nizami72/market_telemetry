@@ -240,8 +240,8 @@ def run_lgbm_fixed_backtester():
                 current_trade = None
 
         if executed_trades:
-            pd.DataFrame(executed_trades).to_csv("trades_log.csv", index=False)
-            print("💾 Лог сделок успешно сохранен в trades_log.csv для отрисовки графиков.")
+            pd.DataFrame(executed_trades).to_csv("data/trades_log.csv", index=False)
+            print("💾 Лог сделок успешно сохранен в data/trades_log.csv для отрисовки графиков.")
 
 if __name__ == "__main__":
     run_lgbm_fixed_backtester()

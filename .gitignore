@@ -6,3 +6,9 @@
 /src/market_telemetry/signals_snapshots/
 /src/market_telemetry/backtest_results_with_signals.csv
 /src/market_telemetry/trading_execution_logs.csv
+/data/backtest_results_with_signals.csv
+/data/labeled_market_data.csv
+/data/market_data.csv
+/data/multidim_labeled_market_data.csv
+/data/trades_log.csv
+/data/trading_execution_logs.csv

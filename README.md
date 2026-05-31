@@ -32,7 +32,7 @@ python multidim_logger.py
 
 ```
 
-* **Выходной файл:** `multidim_market_data.csv`
+* **Выходной файл:** `data/multidim_market_data.csv`
 * *Примечание:* Для обучения качественной модели рекомендуется оставить логгер работать в фоне минимум на 1–2 дня до накопления 15 000+ строк.
 
 ### Шаг 2: Внедрение контекста и фильтрация шума (Разметчик)
@@ -40,23 +40,23 @@ python multidim_logger.py
 Скрипт рассчитывает скользящие окна (Z-Score скорости, кумулятивную дельту за 2/5 минут, скорость плит) и размечает чистые 15-минутные импульсы (> $40), отсекая флэт.
 
 ```bash
-python multidim_labeler.py
+python src/market_telemetry/multidim_labeler.py
 
 ```
 
-* **Вход:** `multidim_market_data.csv`
-* **Выходной файл:** `multidim_labeled_market_data.csv` (очищенная матрица фичей).
+* **Вход:** `data/multidim_market_data.csv`
+* **Выходной файл:** `src/market_telemetry/data/multidim_labeled_market_data.csv` (очищенная матрица фичей).
 
 ### Шаг 3: Обучение градиентного бустинга (Обучение)
 
 Обучает модель `LightGBM` на хронологической выборке (первые 80% данных) и проверяет базовую точность на отложенном тесте (последние 20%).
 
 ```bash
-python lgbm_train.py
+python src/market_telemetry/lgbm_train.py
 
 ```
 
-* **Вход:** `multidim_labeled_market_data.csv`
+* **Вход:** `src/market_telemetry/data/multidim_labeled_market_data.csv`
 * **Выходной файл:** `lgbm_market_model.pkl` (сохраненные веса модели).
 
 ### Шаг 4: Торговая симуляция (Бэктестер)
@@ -64,11 +64,11 @@ python lgbm_train.py
 Запускает симулятор торговли на тестовом куске истории, проверяя реальное математическое ожидание модели с использованием жестких ордеров `Take Profit` и `Stop Loss`.
 
 ```bash
-python lgbm_backtester.py
+python src/market_telemetry/lgbm_backtester.py
 
 ```
 
-* **Вход:** `multidim_labeled_market_data.csv` + `lgbm_market_model.pkl`
+* **Вход:** `src/market_telemetry/data/multidim_labeled_market_data.csv` + `lgbm_market_model.pkl`
 * **Вывод:** Финансовый отчет в USDT, количество сделок, соотношение прибыльных `TP` к убыточным `SL`.
 
 ---

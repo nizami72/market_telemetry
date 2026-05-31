@@ -4,8 +4,8 @@ import numpy as np
 import mplfinance as mpf
 
 def generate_mirror_snapshots():
-    market_data_file = "../../multidim_market_data.csv"
-    trades_log_file = "trades_log.csv"
+    market_data_file = "../../data/multidim_market_data.csv"
+    trades_log_file = "../../data/trades_log.csv"
     output_dir = "signals_snapshots"
 
     if not os.path.exists(output_dir):
