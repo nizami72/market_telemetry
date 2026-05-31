@@ -1,168 +1,247 @@
 import joblib
 import numpy as np
 import pandas as pd
-from sklearn.model_selection import train_test_split
-
+import configparser
 
 def run_lgbm_fixed_backtester():
-    csv_file = "multidim_labeled_market_data.csv"
-    model_file = "lgbm_market_model.pkl"
+    # 📖 Инициализируем парсер конфигов
+    config = configparser.ConfigParser()
+    config.read("config.ini")
+
+    # Читаем пути к файлам
+    csv_file = config.get("MARKET_DATA", "csv_file")
+    model_file = config.get("MARKET_DATA", "model_file")
 
     print(f"📖 Загружаю датасет {csv_file}...")
     try:
-        df = pd.read_csv(csv_file)
-        model = joblib.load(model_file)
+        # ИСПРАВЛЕНО: Читаем сразу в переменную df_test, чтобы всё работало дальше
+        df_test = pd.read_csv(csv_file)
+        test_size = int(len(df_test) * 0.2)
+        df_test = df_test.iloc[-test_size:].reset_index(drop=True)
+        print(f"🛡️ Активирован режим Out-of-Sample. Для симуляции взято {len(df_test)} чистых строк.")
     except FileNotFoundError as e:
         print(f"❌ Ошибка загрузки файлов: {e}")
         return
 
+    # Читаем настройки робота (автоматически приводим типы к float/int)
+    threshold = config.getfloat("BACKTESTER", "threshold")
+    initial_balance = config.getfloat("BACKTESTER", "initial_balance")
+    tp_sl_size = config.getfloat("BACKTESTER", "tp_sl_size")
+    risk_per_trade = config.getfloat("BACKTESTER", "risk_per_trade")
+    commission_rate = config.getfloat("BACKTESTER", "commission_rate")
+
     feature_cols = [
-        "imbalance_5",
-        "imbalance_20",
-        "imbalance_50",
-        "market_delta_10s",
-        "trade_speed_10s",
-        "speed_zscore",
-        "delta_rolling_2m",
-        "delta_rolling_5m",
-        "imb_20_velocity",
+        "imbalance_5", "imbalance_20", "imbalance_50",
+        "market_delta_10s", "trade_speed_10s", "speed_zscore",
+        "delta_rolling_2m", "delta_rolling_5m", "imb_20_velocity",
+        "delta_rolling_30m", "delta_rolling_1h", "price_velocity_15m"
     ]
 
-    X = df[feature_cols]
-    y = df["label_next_price"]
+    # Защита: проверяем, что все нужные фичи на месте
+    for col in feature_cols:
+        if col not in df_test.columns:
+            df_test[col] = 0.0
 
-    _, X_test, _, y_test = train_test_split(
-        X, y, test_size=0.2, random_state=42, shuffle=False
-    )
+    X_test = df_test[feature_cols].values
 
+    print(f"🤖 Загружаю модель {model_file}...")
+    model = joblib.load(model_file)
+
+    print("🔮 Делаю предсказания...")
     preds_proba = model.predict(X_test)
-    df_test = df.loc[y_test.index].copy()
-    df_test["proba"] = preds_proba
+
+    # РАСПАКОВКА ВЕРОЯТНОСТЕЙ (Сверяем индексы классов из lgbm_train.py!)
+    # В тренере было: y = label_next_price + 1
+    # Следовательно:
+    # Класс 0 -> DOWN (Падение)
+    # Класс 1 -> FLAT (Флэт)
+    # Класс 2 -> UP   (Рост)
+    df_test["proba_down"] = preds_proba[:, 0]
+    df_test["proba_flat"] = preds_proba[:, 1]
+    df_test["proba_up"]   = preds_proba[:, 2]
+
+    print("\n📊 ДИАГНОСТИКА ВЕРОЯТНОСТЕЙ ИИ (Первые 5 строк теста):")
+    print(df_test[["proba_down", "proba_flat", "proba_up"]].head())
+
+    print("\n📊 МАКСИМАЛЬНЫЕ ЗНАЧЕНИЯ ВЕРОЯТНОСТЕЙ НА ВСЕМ ТЕСТЕ:")
+    print(f"Max Up: {df_test['proba_up'].max():.4f} | Max Down: {df_test['proba_down'].max():.4f}")
+
+    print(f"Количество сигналов LONG (1): {df_test[df_test['signal'] == 1].shape[0]}")
+    print(f"Количество сигналов SHORT (-1): {df_test[df_test['signal'] == -1].shape[0]}\n")
+
+
+    # Генерируем сигналы на основе порога 55%
+    conditions = [
+        df_test["proba_up"] > threshold,
+        df_test["proba_down"] > threshold
+    ]
+    choices = [1, -1]
+    df_test["signal"] = np.select(conditions, choices, default=0)
 
     # ==========================================
-    # ⚙️ НАСТРОЙКИ РОБОТА-СКАЛЬПЕРА
+    # 💰 ТОРГОВЫЙ СИМУЛЯТОР С БАЛАНСОМ И ЛОГАМИ
     # ==========================================
-    confidence_threshold = 0.55
-    tp_sl_size = 55.0
-    commission_rate = 0.0006  # 0.06% Bybit Taker
+    print("⚙️ Запускаю торговую симуляцию...\n")
 
-    start_balance = 1000.0
-    balance = start_balance
-    position = 0
+    # НАСТРОЙКИ СИМУЛЯТОРА
+    balance = initial_balance
+
+    position = 0               # 0 = вне рынка, 1 = Long, -1 = Short
     entry_price = 0.0
+    position_size = 0.0        # Будет рассчитываться динамически
 
-    # Временные переменные для фиксации параметров открываемой сделки
-    entry_time = None
-    entry_conf = 0.0
+    trade_logs = []
+    win_trades = 0
+    loss_trades = 0
 
-    # Новый структурированный массив сделок для визуализатора
-    executed_trades = []
+    price_col = "price"
 
-    print(
-        f"🚀 Скальпер запущен. Порог: {confidence_threshold*100}% | TP/SL: ${tp_sl_size}"
-    )
+    for i, row in df_test.iterrows():
+        signal = row["signal"]
+        current_price = row[price_col]
+        timestamp = row.get("timestamp", f"Tick_{i}")
 
-    for i in range(len(df_test)):
-        current_row = df_test.iloc[i]
-        current_price = current_row["price"]
-        proba = current_row["proba"]
-        timestamp = current_row["timestamp"]
+        # 1. ЛОГИКА ВЫХОДА ПО ЖЕСТКИМ МИШЕНЯМ (TP/SL)
+        if position != 0:
+            is_closed = False
+            pnl = 0.0
+            action_str = ""
 
-        # 1. ЛОГИКА ВХОДА
-        if proba >= confidence_threshold and position == 0:
-            position = 1
+            if position == 1:  # Проверка для LONG
+                price_change = current_price - entry_price
+                if price_change >= tp_sl_size:
+                    pnl = tp_sl_size * position_size
+                    action_str = "TAKE_PROFIT LONG"
+                    win_trades += 1
+                    is_closed = True
+                elif price_change <= -tp_sl_size:
+                    pnl = -tp_sl_size * position_size
+                    action_str = "STOP_LOSS LONG"
+                    loss_trades += 1
+                    is_closed = True
+                # Экстренный переворот, если ИИ жестко уверен в падении
+                elif signal == -1:
+                    pnl = price_change * position_size
+                    action_str = "REVERSE CLOSE LONG"
+                    if pnl > 0: win_trades += 1
+                    else: loss_trades += 1
+                    is_closed = True
+
+            elif position == -1:  # Проверка для SHORT
+                price_change = entry_price - current_price
+                if price_change >= tp_sl_size:
+                    pnl = tp_sl_size * position_size
+                    action_str = "TAKE_PROFIT SHORT"
+                    win_trades += 1
+                    is_closed = True
+                elif price_change <= -tp_sl_size:
+                    pnl = -tp_sl_size * position_size
+                    action_str = "STOP_LOSS SHORT"
+                    loss_trades += 1
+                    is_closed = True
+                # Экстренный переворот, если ИИ жестко уверен в росте
+                elif signal == 1:
+                    pnl = price_change * position_size
+                    action_str = "REVERSE CLOSE SHORT"
+                    if pnl > 0: win_trades += 1
+                    else: loss_trades += 1
+                    is_closed = True
+
+            if is_closed:
+                balance += pnl
+                # Вычитаем комиссию за выход
+                balance -= (current_price * position_size) * commission_rate
+
+                trade_logs.append({
+                    "time": timestamp, "action": action_str,
+                    "price": current_price, "pnl": pnl, "balance": balance
+                })
+                position = 0
+                position_size = 0.0
+                continue  # На этом тике больше ничего не делаем
+
+        # 2. ЛОГИКА ОТКРЫТИЯ ПОЗИЦИИ (Только если мы вне рынка)
+        if position == 0 and signal != 0:
+            position = signal
             entry_price = current_price
-            entry_time = timestamp
-            entry_conf = proba
-            balance -= balance * commission_rate
-            continue
 
-        # 2. ЛОГИКА ВЫХОДА ПО ЖЕСТКИМ МИШЕНЯМ
-        if position == 1:
-            price_change = current_price - entry_price
+            # РАСЧЕТ РИСК-МЕНЕДЖМЕНТА (1% риска от капитала)
+            cash_risk = balance * risk_per_trade
+            position_size = cash_risk / tp_sl_size  # Динамический объем в BTC
 
-            # Выход по Take Profit
-            if price_change >= tp_sl_size:
-                position = 0
-                price_return = (current_price - entry_price) / entry_price
-                balance += balance * price_return
-                balance -= balance * commission_rate
+            # Вычитаем комиссию за вход
+            balance -= (entry_price * position_size) * commission_rate
 
-                executed_trades.append({
-                    "direction": "LONG",
-                    "entry_time": entry_time,
-                    "entry_price": entry_price,
-                    "exit_time": timestamp,
-                    "exit_price": current_price,
-                    "tp_price": entry_price + tp_sl_size,
-                    "sl_price": entry_price - tp_sl_size,
-                    "result": "PROFIT",
-                    "conf": entry_conf
-                })
+            action_str = "OPEN LONG" if position == 1 else "OPEN SHORT"
+            trade_logs.append({
+                "time": timestamp, "action": action_str,
+                "price": current_price, "pnl": 0.0, "balance": balance
+            })
 
-            # Выход по Stop Loss
-            elif price_change <= -tp_sl_size:
-                position = 0
-                price_return = (current_price - entry_price) / entry_price
-                balance += balance * price_return
-                balance -= balance * commission_rate
-
-                executed_trades.append({
-                    "direction": "LONG",
-                    "entry_time": entry_time,
-                    "entry_price": entry_price,
-                    "exit_time": timestamp,
-                    "exit_price": current_price,
-                    "tp_price": entry_price + tp_sl_size,
-                    "sl_price": entry_price - tp_sl_size,
-                    "result": "LOSS",
-                    "conf": entry_conf
-                })
-
-    # Принудительное закрытие в конце истории
-    if position == 1:
-        current_row = df_test.iloc[-1]
-        current_price = current_row["price"]
-        price_return = (current_price - entry_price) / entry_price
-        balance += balance * price_return
-        balance -= balance * commission_rate
-
-        executed_trades.append({
-            "direction": "LONG",
-            "entry_time": entry_time,
-            "entry_price": entry_price,
-            "exit_time": current_row["timestamp"],
-            "exit_price": current_price,
-            "tp_price": entry_price + tp_sl_size,
-            "sl_price": entry_price - tp_sl_size,
-            "result": "PROFIT" if current_price > entry_price else "LOSS",
-            "conf": entry_conf
+    # Принудительно закрываем позицию в самом конце истории
+    if position != 0:
+        last_row = df_test.iloc[-1]
+        last_price = last_row[price_col]
+        pnl = (last_price - entry_price) * position * position_size
+        balance += pnl
+        balance -= (last_price * position_size) * commission_rate
+        trade_logs.append({
+            "time": last_row.get("timestamp", "End"),
+            "action": "FORCE CLOSE", "price": last_price, "pnl": pnl, "balance": balance
         })
+        if pnl > 0: win_trades += 1
+        else: loss_trades += 1
 
-    # МЕТРИКИ ДЛЯ КОНСОЛИ
-    total_trades = len(executed_trades)
-    tps = len([t for t in executed_trades if t["result"] == "PROFIT"])
-    sls = len([t for t in executed_trades if t["result"] == "LOSS"])
+    # ==========================================
+    # 📊 ВЫВОД РЕЗУЛЬТАТОВ НА ЭКРАН
+    # ==========================================
+    if trade_logs:
+        print("📝 Последние сделки из лога:")
+        for log in trade_logs[-10:]:
+            pnl_str = f"PnL: {log['pnl']:+8.2f}" if log['pnl'] != 0 else "PnL:     0.00"
+            print(f"[{log['time']}] {log['action']:<18} | Цена: {log['price']:<8.2f} | {pnl_str} | Баланс: {log['balance']:.2f}")
 
-    net_profit_usdt = balance - start_balance
-    profit_percent = (net_profit_usdt / start_balance) * 100
+    total_trades = win_trades + loss_trades
+    win_rate = (win_trades / total_trades * 100) if total_trades > 0 else 0
 
     print("\n" + "=" * 50)
-    print(f"📊 ИТОГОВЫЙ ОТЧЕТ СКАЛЬПЕРА С TP/SL:")
+    print(f"📊 ИТОГИ МАКРО-ТОРГОВОЙ СИМУЛЯЦИИ:")
     print("=" * 50)
-    print(f"💰 Стартовый баланс:         {start_balance} USDT")
-    print(f"💵 Финальный баланс:         {balance:.2f} USDT")
-    print(f"📈 Чистый Профит:            {net_profit_usdt:.2f} USDT ({profit_percent:.2f}%)")
-    print(f"🔄 Закрытых сделок:          {total_trades} (🟢 TP: {tps} | 🔴 SL: {sls})")
+    print(f"Начальный баланс:  {initial_balance:.2f} USDT")
+    print(f"Итоговый баланс:   {balance:.2f} USDT")
+    print(f"Чистая прибыль:    {balance - initial_balance:+.2f} USDT")
+    print(f"Всего сделок:      {total_trades}")
+    print(f"Успешных сделок:   {win_trades} ({win_rate:.1f}%)")
+    print(f"Убыточных сделок:  {loss_trades}")
+    print("=" * 50)
 
-    # ==========================================
-    # 💾 ЧЕСТНЫЙ ЭКСПОРТ ДЛЯ ВИЗУАЛИЗАТОРА
-    # ==========================================
-    if total_trades > 0:
-        trades_df = pd.DataFrame(executed_trades)
-        trades_df.to_csv("trades_log.csv", index=False)
-        print(f"💾 Лог сделок сохранен в trades_log.csv для зеркальной отрисовки.")
+    # Экспорт результатов в файл для визуализатора
+    if trade_logs:
+        df_logs = pd.DataFrame(trade_logs)
+        # Для обратной совместимости с visualize_signals.py пересохраняем в trades_log.csv
+        # Но трансформируем плоский лог в парную структуру
+        executed_trades = []
+        current_trade = None
 
+        for log in trade_logs:
+            if "OPEN" in log["action"]:
+                current_trade = {
+                    "direction": "LONG" if "LONG" in log["action"] else "SHORT",
+                    "entry_time": log["time"],
+                    "entry_price": log["price"],
+                    "tp_price": log["price"] + tp_sl_size if "LONG" in log["action"] else log["price"] - tp_sl_size,
+                    "sl_price": log["price"] - tp_sl_size if "LONG" in log["action"] else log["price"] + tp_sl_size,
+                }
+            elif current_trade is not None:
+                current_trade["exit_time"] = log["time"]
+                current_trade["exit_price"] = log["price"]
+                current_trade["result"] = "PROFIT" if "TAKE_PROFIT" in log["action"] or log["pnl"] > 0 else "LOSS"
+                executed_trades.append(current_trade)
+                current_trade = None
+
+        if executed_trades:
+            pd.DataFrame(executed_trades).to_csv("trades_log.csv", index=False)
+            print("💾 Лог сделок успешно сохранен в trades_log.csv для отрисовки графиков.")
 
 if __name__ == "__main__":
     run_lgbm_fixed_backtester()

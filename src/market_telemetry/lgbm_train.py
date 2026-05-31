@@ -1,76 +1,97 @@
-# Создаем продвинутый скрипт обучения lgbm_train.py
-# Changing the model
-# Этот скрипт не просто обучит LightGBM, но и сохранит обученный «мозг» в файл lgbm_market_model.pkl, чтобы бэктестер мог его использовать.
 import joblib
 import lightgbm as lgb
+import numpy as np
 import pandas as pd
-from sklearn.metrics import accuracy_score, classification_report
-from sklearn.model_selection import train_test_split
+import warnings
+from sklearn.model_selection import TimeSeriesSplit
+from sklearn.metrics import log_loss, roc_auc_score
 
+# Отключаем спам-предупреждения, если в фолде попался только один класс
+warnings.filterwarnings('ignore', category=UserWarning)
 
 def train_lgbm():
     csv_file = "multidim_labeled_market_data.csv"
-
     print(f"📖 Загружаю датасет {csv_file} для LightGBM...")
     df = pd.read_csv(csv_file)
 
     feature_cols = [
-        "imbalance_5",
-        "imbalance_20",
-        "imbalance_50",
-        "market_delta_10s",
-        "trade_speed_10s",
-        "speed_zscore",
-        "delta_rolling_2m",
-        "delta_rolling_5m",
-        "imb_20_velocity",
+        "imbalance_5", "imbalance_20", "imbalance_50",
+        "market_delta_10s", "trade_speed_10s", "speed_zscore",
+        "delta_rolling_2m", "delta_rolling_5m", "imb_20_velocity",
+        "delta_rolling_30m", "delta_rolling_1h", "price_velocity_15m"
     ]
 
-    X = df[feature_cols]
-    y = df["label_next_price"]
+    X = df[feature_cols].values
 
-    # Хронологическое разделение
-    X_train, X_test, y_train, y_test = train_test_split(
-        X, y, test_size=0.2, random_state=42, shuffle=False
-    )
+    # Сдвигаем классы из [-1, 0, 1] в [0, 1, 2] для LightGBM
+    y = df["label_next_price"].values + 1
 
-    print("🏋️‍♂️ Начинаю градиентный бустинг LightGBM...")
+    tscv = TimeSeriesSplit(n_splits=5)
+    print("🏋️‍♂️ Начинаю валидацию LightGBM на временных рядах...")
 
-    # Настройки для бинарной классификации с выводом вероятностей
     params = {
-        "objective": "binary",
-        "metric": "binary_logloss",
+        "objective": "multiclass",
+        "num_class": 3,
+        "metric": "multi_logloss",
         "boosting_type": "gbdt",
         "learning_rate": 0.05,
         "max_depth": 5,
         "num_leaves": 31,
         "verbose": -1,
         "random_state": 42,
+        "n_jobs": -1
     }
 
-    # Переводим данные в нативный формат LightGBM
-    train_data = lgb.Dataset(X_train, label=y_train)
+    oof_logloss = []
+    oof_auc = []
+    best_iterations = []
 
-    # Обучаем модель (100 итераций/деревьев последовательного улучшения)
-    model = lgb.train(params, train_data, num_boost_round=100)
-    print("✅ LightGBM успешно обучен!")
+    for fold, (train_idx, test_idx) in enumerate(tscv.split(X)):
+        X_train, X_test = X[train_idx], X[test_idx]
+        y_train, y_test = y[train_idx], y[test_idx]
 
-    # Тестируем (модель выдает вероятности от 0.0 до 1.0)
-    preds_proba = model.predict(X_test)
+        train_data = lgb.Dataset(X_train, label=y_train)
+        valid_data = lgb.Dataset(X_test, label=y_test, reference=train_data)
 
-    # Для базовой метрики переводим в 0 и 1 по стандартному порогу 0.5
-    preds_binary = [1 if p > 0.5 else 0 for p in preds_proba]
+        model = lgb.train(
+            params,
+            train_data,
+            num_boost_round=1000,
+            valid_sets=[valid_data],
+            callbacks=[lgb.early_stopping(stopping_rounds=30, verbose=False)]
+        )
 
-    accuracy = accuracy_score(y_test, preds_binary)
+        best_iterations.append(model.best_iteration)
+
+        preds_proba = model.predict(X_test)
+
+        # Явно указываем labels=[0, 1, 2], чтобы избежать ошибки размерностей
+        loss = log_loss(y_test, preds_proba, labels=[0, 1, 2])
+
+        try:
+            auc = roc_auc_score(y_test, preds_proba, multi_class='ovr', labels=[0, 1, 2])
+        except ValueError:
+            auc = np.nan # Если класс всё-таки один, пишем nan, чтобы не ронять скрипт
+
+        oof_logloss.append(loss)
+        oof_auc.append(auc)
+        print(f"Fold {fold+1} -> LogLoss: {loss:.4f} | AUC: {auc:.4f} | Trees: {model.best_iteration}")
+
     print("\n" + "=" * 50)
-    print(f"🎯 БАЗОВАЯ ТОЧНОСТЬ LIGHTGBM (Порог 0.5): {accuracy * 100:.1f}%")
+    # np.nanmean корректно считает среднее, игнорируя 'nan'
+    print(f"🎯 СРЕДНИЙ ROC-AUC: {np.nanmean(oof_auc):.4f}")
+    print(f"🎯 СРЕДНИЙ LOGLOSS: {np.mean(oof_logloss):.4f}")
     print("=" * 50)
 
-    # Сохраняем модель на диск
-    model_file = "lgbm_market_model.pkl"
-    joblib.dump(model, model_file)
-    print(f"💾 Модель сохранена в файл: {model_file}")
+    optimal_trees = int(np.mean(best_iterations))
+    print(f"🚀 Обучаю финальный 'мозг' на 100% данных (Оптимальное кол-во деревьев: {optimal_trees})...")
 
+    full_train_data = lgb.Dataset(X, label=y)
+    final_model = lgb.train(params, full_train_data, num_boost_round=optimal_trees)
+
+    model_file = "lgbm_market_model.pkl"
+    joblib.dump(final_model, model_file)
+    print(f"💾 Модель сохранена в файл: {model_file}")
 
 if __name__ == "__main__":
     train_lgbm()

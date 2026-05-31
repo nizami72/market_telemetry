@@ -3,3 +3,6 @@
 /src/market_telemetry/lgbm_market_model.pkl
 /multidim_market_data_new.csv
 /src/market_telemetry/trades_log.csv
+/src/market_telemetry/signals_snapshots/
+/src/market_telemetry/backtest_results_with_signals.csv
+/src/market_telemetry/trading_execution_logs.csv
