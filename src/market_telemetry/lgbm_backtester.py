@@ -42,8 +42,8 @@ def run_lgbm_fixed_backtester():
     # ==========================================
     # ⚙️ НАСТРОЙКИ РОБОТА-СКАЛЬПЕРА
     # ==========================================
-    confidence_threshold = 0.55  # Входим только при уверенности 60%+
-    tp_sl_size = 55.0  # Жесткий Тейк и Стоп в $6 (чуть выше нашего порога разметки $5)
+    confidence_threshold = 0.55
+    tp_sl_size = 55.0
     commission_rate = 0.0006  # 0.06% Bybit Taker
 
     start_balance = 1000.0
@@ -51,7 +51,12 @@ def run_lgbm_fixed_backtester():
     position = 0
     entry_price = 0.0
 
-    trades_history = []
+    # Временные переменные для фиксации параметров открываемой сделки
+    entry_time = None
+    entry_conf = 0.0
+
+    # Новый структурированный массив сделок для визуализатора
+    executed_trades = []
 
     print(
         f"🚀 Скальпер запущен. Порог: {confidence_threshold*100}% | TP/SL: ${tp_sl_size}"
@@ -67,19 +72,12 @@ def run_lgbm_fixed_backtester():
         if proba >= confidence_threshold and position == 0:
             position = 1
             entry_price = current_price
+            entry_time = timestamp
+            entry_conf = proba
             balance -= balance * commission_rate
-            trades_history.append(
-                {
-                    "type": "BUY",
-                    "price": entry_price,
-                    "balance": balance,
-                    "time": timestamp,
-                    "conf": proba,
-                }
-            )
             continue
 
-        # 2. ЛОГИКА ВЫХОДА ПО ЖЕСТКИМ МИШЕНЯМ (Внутри позиции)
+        # 2. ЛОГИКА ВЫХОДА ПО ЖЕСТКИМ МИШЕНЯМ
         if position == 1:
             price_change = current_price - entry_price
 
@@ -89,14 +87,18 @@ def run_lgbm_fixed_backtester():
                 price_return = (current_price - entry_price) / entry_price
                 balance += balance * price_return
                 balance -= balance * commission_rate
-                trades_history.append(
-                    {
-                        "type": "TAKE_PROFIT",
-                        "price": current_price,
-                        "balance": balance,
-                        "time": timestamp,
-                    }
-                )
+
+                executed_trades.append({
+                    "direction": "LONG",
+                    "entry_time": entry_time,
+                    "entry_price": entry_price,
+                    "exit_time": timestamp,
+                    "exit_price": current_price,
+                    "tp_price": entry_price + tp_sl_size,
+                    "sl_price": entry_price - tp_sl_size,
+                    "result": "PROFIT",
+                    "conf": entry_conf
+                })
 
             # Выход по Stop Loss
             elif price_change <= -tp_sl_size:
@@ -104,36 +106,43 @@ def run_lgbm_fixed_backtester():
                 price_return = (current_price - entry_price) / entry_price
                 balance += balance * price_return
                 balance -= balance * commission_rate
-                trades_history.append(
-                    {
-                        "type": "STOP_LOSS",
-                        "price": current_price,
-                        "balance": balance,
-                        "time": timestamp,
-                    }
-                )
 
-    # Принудительное закрытие в конце
+                executed_trades.append({
+                    "direction": "LONG",
+                    "entry_time": entry_time,
+                    "entry_price": entry_price,
+                    "exit_time": timestamp,
+                    "exit_price": current_price,
+                    "tp_price": entry_price + tp_sl_size,
+                    "sl_price": entry_price - tp_sl_size,
+                    "result": "LOSS",
+                    "conf": entry_conf
+                })
+
+    # Принудительное закрытие в конце истории
     if position == 1:
-        current_price = df_test.iloc[-1]["price"]
+        current_row = df_test.iloc[-1]
+        current_price = current_row["price"]
         price_return = (current_price - entry_price) / entry_price
         balance += balance * price_return
         balance -= balance * commission_rate
-        trades_history.append(
-            {
-                "type": "END_CLOSE",
-                "price": current_price,
-                "balance": balance,
-                "time": df_test.iloc[-1]["timestamp"],
-            }
-        )
 
-    # МЕТРИКИ
-    total_trades = len(
-        [t for t in trades_history if t["type"] in ["TAKE_PROFIT", "STOP_LOSS", "END_CLOSE"]]
-    )
-    tps = len([t for t in trades_history if t["type"] == "TAKE_PROFIT"])
-    sls = len([t for t in trades_history if t["type"] == "STOP_LOSS"])
+        executed_trades.append({
+            "direction": "LONG",
+            "entry_time": entry_time,
+            "entry_price": entry_price,
+            "exit_time": current_row["timestamp"],
+            "exit_price": current_price,
+            "tp_price": entry_price + tp_sl_size,
+            "sl_price": entry_price - tp_sl_size,
+            "result": "PROFIT" if current_price > entry_price else "LOSS",
+            "conf": entry_conf
+        })
+
+    # МЕТРИКИ ДЛЯ КОНСОЛИ
+    total_trades = len(executed_trades)
+    tps = len([t for t in executed_trades if t["result"] == "PROFIT"])
+    sls = len([t for t in executed_trades if t["result"] == "LOSS"])
 
     net_profit_usdt = balance - start_balance
     profit_percent = (net_profit_usdt / start_balance) * 100
@@ -145,6 +154,14 @@ def run_lgbm_fixed_backtester():
     print(f"💵 Финальный баланс:         {balance:.2f} USDT")
     print(f"📈 Чистый Профит:            {net_profit_usdt:.2f} USDT ({profit_percent:.2f}%)")
     print(f"🔄 Закрытых сделок:          {total_trades} (🟢 TP: {tps} | 🔴 SL: {sls})")
+
+    # ==========================================
+    # 💾 ЧЕСТНЫЙ ЭКСПОРТ ДЛЯ ВИЗУАЛИЗАТОРА
+    # ==========================================
+    if total_trades > 0:
+        trades_df = pd.DataFrame(executed_trades)
+        trades_df.to_csv("trades_log.csv", index=False)
+        print(f"💾 Лог сделок сохранен в trades_log.csv для зеркальной отрисовки.")
 
 
 if __name__ == "__main__":

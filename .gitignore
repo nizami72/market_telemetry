@@ -1,3 +1,5 @@
 /.venv/
 /.idea/
 /src/market_telemetry/lgbm_market_model.pkl
+/multidim_market_data_new.csv
+/src/market_telemetry/trades_log.csv
