@@ -92,3 +92,24 @@ python src/market_telemetry/lgbm_backtester.py
 ---
 
 Можешь смело копировать этот блок в свой проект. Он закроет все вопросы по развертыванию, когда ты вернешься к коду спустя какое-то время.
+
+### How to start
+Go to the project folder
+```shell
+cd /home/nizami/projects/python/market_telemetry/src/market_telemetry
+```
+
+activate envinronment
+```shell
+source /home/nizami/projects/python/market_telemetry/.venv/bin/activate
+```
+
+And start scripts
+```shell
+python multidim_labeler.py && python lgbm_train.py && python lgbm_backtester.py
+```
+
+Then visualize it
+```shell
+python visualize_backtest_results.py
+```

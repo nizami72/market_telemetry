@@ -50,16 +50,26 @@ def run_lgbm_fixed_backtester():
     print("🔮 Делаю предсказания...")
     preds_proba = model.predict(X_test)
 
-    # РАСПАКОВКА ВЕРОЯТНОСТЕЙ (Сверяем индексы классов из lgbm_train.py!)
-    # В тренере было: y = label_next_price + 1
-    # Следовательно:
-    # Класс 0 -> DOWN (Падение)
-    # Класс 1 -> FLAT (Флэт)
-    # Класс 2 -> UP   (Рост)
+    # РАСПАКОВКА ВЕРОЯТНОСТЕЙ
     df_test["proba_down"] = preds_proba[:, 0]
     df_test["proba_flat"] = preds_proba[:, 1]
     df_test["proba_up"]   = preds_proba[:, 2]
 
+    # ГЕНЕРИРУЕМ СИГНАЛЫ (ИСПРАВЛЕНО: сначала создаем колонку signal)
+    # Используем относительный перевес: если вероятность UP или DOWN
+    # выше, чем противоположная, и flat начинает локально падать.
+    # Но для теста давай сделаем чистый Argmax, чтобы заставить робота торговать!
+
+    threshold = config.getfloat("BACKTESTER", "threshold")
+
+    conditions = [
+        df_test["proba_up"] > threshold,
+        df_test["proba_down"] > threshold
+    ]
+    choices = [1, -1]
+    df_test["signal"] = np.select(conditions, choices, default=0)
+
+    # 📊 ДИАГНОСТИКА (Теперь строго ПОСЛЕ создания колонки signal)
     print("\n📊 ДИАГНОСТИКА ВЕРОЯТНОСТЕЙ ИИ (Первые 5 строк теста):")
     print(df_test[["proba_down", "proba_flat", "proba_up"]].head())
 
@@ -238,10 +248,16 @@ def run_lgbm_fixed_backtester():
                 current_trade["result"] = "PROFIT" if "TAKE_PROFIT" in log["action"] or log["pnl"] > 0 else "LOSS"
                 executed_trades.append(current_trade)
                 current_trade = None
+    if executed_trades:
+        # ИСПРАВЛЕНО: безопасное сохранение с автосозданием папки
+        import os
+        output_dir = "../../data"  # Поднимаемся к твоей реальной папке с данными
+        os.makedirs(output_dir, exist_ok=True)
 
-        if executed_trades:
-            pd.DataFrame(executed_trades).to_csv("data/trades_log.csv", index=False)
-            print("💾 Лог сделок успешно сохранен в data/trades_log.csv для отрисовки графиков.")
+        log_path = os.path.join(output_dir, "trades_log.csv")
+        pd.DataFrame(executed_trades).to_csv(log_path, index=False)
+        print(f"💾 Лог сделок успешно сохранен в {log_path} для отрисовки графиков.")
+
 
 if __name__ == "__main__":
     run_lgbm_fixed_backtester()
