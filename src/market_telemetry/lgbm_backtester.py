@@ -35,6 +35,11 @@ def run_lgbm_fixed_backtester():
         "market_delta_10s", "trade_speed_10s", "speed_zscore",
         "delta_rolling_2m", "delta_rolling_5m", "imb_20_velocity",
         "delta_rolling_30m", "delta_rolling_1h", "price_velocity_15m"
+        ,
+        # Наш новый Feature Engineering:
+        "speed_ratio_1m", "speed_ratio_5m", "speed_ratio_15m",
+        "cum_delta_1m", "cum_delta_5m", "cum_delta_15m",
+        "price_change_5m", "price_change_1h"
     ]
 
     # Защита: проверяем, что все нужные фичи на месте
@@ -101,6 +106,7 @@ def run_lgbm_fixed_backtester():
     position_size = 0.0        # Будет рассчитываться динамически
 
     trade_logs = []
+    executed_trades = []
     win_trades = 0
     loss_trades = 0
 

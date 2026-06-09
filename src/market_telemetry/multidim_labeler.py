@@ -51,24 +51,47 @@ def make_impulse_time_machine():
     # ==========================================
     # 🧪 FEATURE ENGINEERING (КОНТЕКСТ)
     # ==========================================
+    print("⚙️ Генерирую расширенные фичи объемов и окон...")
+
     rolling_speed_mean = df["trade_speed_10s"].rolling(window=30, min_periods=5).mean()
     rolling_speed_std = df["trade_speed_10s"].rolling(window=30, min_periods=5).std()
-    # Безопасный расчет Z-Score
+
+    # Твой базовый Z-Score
     df["speed_zscore"] = ((df["trade_speed_10s"] - rolling_speed_mean) / rolling_speed_std)
     df["speed_zscore"] = df["speed_zscore"].replace([np.inf, -np.inf], np.nan).fillna(0.0)
 
+    # Твои базовые окна
     df["delta_rolling_2m"] = df["market_delta_10s"].rolling(window=12, min_periods=3).sum().fillna(0)
     df["delta_rolling_5m"] = df["market_delta_10s"].rolling(window=30, min_periods=5).sum().fillna(0)
     df["imb_20_velocity"] = df["imbalance_20"] - df["imbalance_20"].shift(6)
 
-    # 🚀 ДОБАВЛЯЕМ МАКРО-ФИЧИ ДЛЯ ЧАСОВОГО ТРЕНДА:
-    # 1. Кумулятивная дельта за 30 минут (30 * 6 = 180 строк)
+    # Твои базовые макро-фичи
     df["delta_rolling_30m"] = df["market_delta_10s"].rolling(window=180, min_periods=30).sum().fillna(0)
     # 2. Кумулятивная дельта за 1 час (60 * 6 = 360 строк)
     df["delta_rolling_1h"] = df["market_delta_10s"].rolling(window=360, min_periods=60).sum().fillna(0)
     # 3. Скорость изменения цены за последние 15 минут (15 * 6 = 90 строк)
     df["price_velocity_15m"] = df["price"] - df["price"].shift(90)
     df["price_velocity_15m"] = df["price_velocity_15m"].fillna(0)
+
+    # 🚨 НОВЫЕ ФИЧИ: Ускорение торгов (Volume/Speed Acceleration)
+    # Показывает взрыв активности относительно средних значений за 1м, 5м, 15м
+    df["speed_ratio_1m"] = df["trade_speed_10s"] / (df["trade_speed_10s"].rolling(window=6, min_periods=1).mean() + 1e-5)
+    df["speed_ratio_5m"] = df["trade_speed_10s"] / (df["trade_speed_10s"].rolling(window=30, min_periods=1).mean() + 1e-5)
+    df["speed_ratio_15m"] = df["trade_speed_10s"] / (df["trade_speed_10s"].rolling(window=90, min_periods=1).mean() + 1e-5)
+
+    # 🚨 НОВЫЕ ФИЧИ: Кумулятивная дельта среднесрочного таймфрейма
+    df["cum_delta_1m"] = df["market_delta_10s"].rolling(window=6, min_periods=1).sum().fillna(0)
+    df["cum_delta_5m"] = df["market_delta_10s"].rolling(window=30, min_periods=1).sum().fillna(0)
+    df["cum_delta_15m"] = df["market_delta_10s"].rolling(window=90, min_periods=1).sum().fillna(0)
+
+    # 🚨 НОВЫЕ ФИЧИ: Скорость изменения цены (Price Change)
+    df["price_change_5m"] = (df["price"] - df["price"].shift(30)).fillna(0)
+    df["price_change_1h"] = (df["price"] - df["price"].shift(360)).fillna(0)
+
+    # Финальное заполнение NaN, если где-то проскочили из-за сдвигов окон
+    df = df.fillna(0.0)
+    # ==========================================
+
 
     # ==========================================
     # ⚡ ИМПУЛЬСНАЯ РАЗМЕТКА (3 КЛАССА)
@@ -93,13 +116,10 @@ def make_impulse_time_machine():
         subset=["future_price", "imb_20_velocity", "speed_zscore"]
     ).copy()
 
-    # 2. Делаем разрежение по фиксированной сетке времени
-    # Берем каждую 3-ю строку от реального потока времени для снижения автокорреляции
+    # 2. Делаем разрежение по фиксированной сетке времени из config.ini
     df_filtered = df_cleaned.iloc[::thinning_step].reset_index(drop=True)
 
-    # ВАЖНО: Мы НЕ удаляем класс 0 (шум). ИИ должен учиться понимать, когда в рынок лезть не надо.
-
-    # 3. Удаляем лишние колонки (чтобы ИИ не подглядывал в будущее)
+    # 3.高度Блокировка: Удаляем лишние колонки расчета
     df_filtered = df_filtered.drop(columns=["future_price", "price_change"])
 
     # Сохраняем новую качественную матрицу
