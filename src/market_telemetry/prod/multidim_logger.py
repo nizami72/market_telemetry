@@ -123,7 +123,7 @@ async def main():
     # Создаем асинхронный инстанс Bybit
     exchange = ccxt.bybit({"enableRateLimit": True})
     symbol = "BTC/USDT"
-    csv_file = "../../data/multidim_market_data.csv"
+    csv_file = "../../multidim_market_data.csv"
 
     # Запускаем параллельные задачи (Workers) в фоне общего Event Loop
     task_book = asyncio.create_task(order_book_producer(exchange, symbol))

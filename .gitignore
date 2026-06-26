@@ -13,3 +13,4 @@
 /data/trades_log.csv
 /data/trading_execution_logs.csv
 /data/multidim_market_data.csv
+/src/market_telemetry/prod/lgbm_market_model.pkl
