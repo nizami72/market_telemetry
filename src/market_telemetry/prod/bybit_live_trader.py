@@ -65,7 +65,7 @@ async def execution_engine(exchange, symbol):
     global latest_order_book, trade_volume_buy_10s, trade_volume_sell_10s, trade_count_10s, config, current_dir, config_path
     # --- АВТОМАТИЧЕСКИЙ РАСЧЕТ ПУТИ К МОДЕЛИ ---
     # Берем имя файла из конфига или хардкодим, если оно фиксированное
-    model_name = config.get("MARKET_DATA", "model_file", fallback="lgbm_market_model.pkl")
+    model_name = config.get("MARKET_DATA", "model_file_prod", fallback="lgbm_live_model.pkl")
     model_path = os.path.join(current_dir, model_name)
 
     print(f"🤖 Загружаю модель ИИ из: {model_path}...")

@@ -3,14 +3,20 @@ import lightgbm as lgb
 import numpy as np
 import pandas as pd
 import warnings
+import configparser
 from sklearn.model_selection import TimeSeriesSplit
 from sklearn.metrics import log_loss, roc_auc_score
 
-# Отключаем спам-предупреждения, если в фолде попался только один класс
 warnings.filterwarnings('ignore', category=UserWarning)
 
 def train_lgbm():
-    csv_file = "../../data/multidim_labeled_market_data.csv"
+    config = configparser.ConfigParser()
+    config.read("config.ini")
+
+    csv_file = config.get("MARKET_DATA", "csv_file")
+    model_file_prod = config.get("MARKET_DATA", "model_file_prod")
+    model_file_test = config.get("MARKET_DATA", "model_file_test")
+
     print(f"📖 Загружаю датасет {csv_file} для LightGBM...")
     df = pd.read_csv(csv_file)
 
@@ -18,21 +24,24 @@ def train_lgbm():
         "imbalance_5", "imbalance_20", "imbalance_50",
         "market_delta_10s", "trade_speed_10s", "speed_zscore",
         "delta_rolling_2m", "delta_rolling_5m", "imb_20_velocity",
-        "delta_rolling_30m", "delta_rolling_1h", "price_velocity_15m"
-        ,
-        # Наш новый Feature Engineering:
+        "delta_rolling_30m", "delta_rolling_1h", "price_velocity_15m",
         "speed_ratio_1m", "speed_ratio_5m", "speed_ratio_15m",
         "cum_delta_1m", "cum_delta_5m", "cum_delta_15m",
         "price_change_5m", "price_change_1h"
     ]
 
     X = df[feature_cols].values
-
-    # Сдвигаем классы из [-1, 0, 1] в [0, 1, 2] для LightGBM
     y = df["label_next_price"].values + 1
 
+    # -------------------------------------------------------------------------
+    # АРХИТЕКТУРНОЕ ИСПРАВЛЕНИЕ: Выделяем 80% данных для построения бэктест-модели
+    # Кросс-валидация должна крутиться СТРОГО внутри этих 80%!
+    # -------------------------------------------------------------------------
+    train_size = int(len(X) * 0.8)
+    X_train_80, y_train_80 = X[:train_size], y[:train_size]
+
     tscv = TimeSeriesSplit(n_splits=5)
-    print("🏋️‍♂️ Начинаю валидацию LightGBM на временных рядах...")
+    print("🏋️‍♂️ Начинаю валидацию LightGBM на временных рядах (внутри тренировочных 80% данных)...")
 
     params = {
         "objective": "multiclass",
@@ -51,12 +60,13 @@ def train_lgbm():
     oof_auc = []
     best_iterations = []
 
-    for fold, (train_idx, test_idx) in enumerate(tscv.split(X)):
-        X_train, X_test = X[train_idx], X[test_idx]
-        y_train, y_test = y[train_idx], y[test_idx]
+    # Запускаем split строго по тренировочной выборке
+    for fold, (train_idx, test_idx) in enumerate(tscv.split(X_train_80)):
+        X_fold_train, X_fold_val = X_train_80[train_idx], X_train_80[test_idx]
+        y_fold_train, y_fold_val = y_train_80[train_idx], y_train_80[test_idx]
 
-        train_data = lgb.Dataset(X_train, label=y_train)
-        valid_data = lgb.Dataset(X_test, label=y_test, reference=train_data)
+        train_data = lgb.Dataset(X_fold_train, label=y_fold_train)
+        valid_data = lgb.Dataset(X_fold_val, label=y_fold_val, reference=train_data)
 
         model = lgb.train(
             params,
@@ -67,36 +77,45 @@ def train_lgbm():
         )
 
         best_iterations.append(model.best_iteration)
+        preds_proba = model.predict(X_fold_val)
 
-        preds_proba = model.predict(X_test)
-
-        # Явно указываем labels=[0, 1, 2], чтобы избежать ошибки размерностей
-        loss = log_loss(y_test, preds_proba, labels=[0, 1, 2])
-
+        loss = log_loss(y_fold_val, preds_proba, labels=[0, 1, 2])
         try:
-            auc = roc_auc_score(y_test, preds_proba, multi_class='ovr', labels=[0, 1, 2])
+            auc = roc_auc_score(y_fold_val, preds_proba, multi_class='ovr', labels=[0, 1, 2])
         except ValueError:
-            auc = np.nan # Если класс всё-таки один, пишем nan, чтобы не ронять скрипт
+            auc = np.nan
 
         oof_logloss.append(loss)
         oof_auc.append(auc)
         print(f"Fold {fold+1} -> LogLoss: {loss:.4f} | AUC: {auc:.4f} | Trees: {model.best_iteration}")
 
     print("\n" + "=" * 50)
-    # np.nanmean корректно считает среднее, игнорируя 'nan'
-    print(f"🎯 СРЕДНИЙ ROC-AUC: {np.nanmean(oof_auc):.4f}")
-    print(f"🎯 СРЕДНИЙ LOGLOSS: {np.mean(oof_logloss):.4f}")
+    print(f"🎯 СРЕДНИЙ ROC-AUC (Валидация): {np.nanmean(oof_auc):.4f}")
+    print(f"🎯 СРЕДНИЙ LOGLOSS (Валидация): {np.mean(oof_logloss):.4f}")
     print("=" * 50)
 
     optimal_trees = int(np.mean(best_iterations))
-    print(f"🚀 Обучаю финальный 'мозг' на 100% данных (Оптимальное кол-во деревьев: {optimal_trees})...")
 
+    # -------------------------------------------------------------------------
+    # МОДЕЛЬ №1: ДЛЯ ЧЕСТНОГО БЭКТЕСТА (Обучаем строго на первых 80% данных)
+    # -------------------------------------------------------------------------
+    print(f"\n🛡️ Сборка модели для БЭКТЕСТЕРА (80% данных)...")
+    backtest_dataset = lgb.Dataset(X_train_80, label=y_train_80)
+    backtest_model = lgb.train(params, backtest_dataset, num_boost_round=optimal_trees)
+
+    # Исправлено: пишем динамическое имя из конфига
+    joblib.dump(backtest_model, model_file_test)
+    print(f"💾 Файл '{model_file_test}' успешно создан.")
+
+    # -------------------------------------------------------------------------
+    # МОДЕЛЬ №2: ДЛЯ ЖИВОЙ ТОРГОВЛИ НА СЕРВЕРЕ (Обучаем на 100% данных)
+    # -------------------------------------------------------------------------
+    print(f"\n🚀 Сборка финальной модели для ПРОДАКШЕНА (100% данных)...")
     full_train_data = lgb.Dataset(X, label=y)
     final_model = lgb.train(params, full_train_data, num_boost_round=optimal_trees)
 
-    model_file = "lgbm_market_model.pkl"
-    joblib.dump(final_model, model_file)
-    print(f"💾 Модель сохранена в файл: {model_file}")
+    joblib.dump(final_model, model_file_prod)
+    print(f"💾 Файл '{model_file_prod}' успешно создан.")
 
 if __name__ == "__main__":
     train_lgbm()
