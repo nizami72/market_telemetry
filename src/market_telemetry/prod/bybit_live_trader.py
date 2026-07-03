@@ -252,20 +252,39 @@ async def execution_engine(exchange, symbol):
 
             # РАСЧЕТ РИСК-МЕНЕДЖМЕНТА 1%
             cash_risk = current_balance * risk_per_trade
-            pos_size_btc = round(cash_risk / tp_sl_size, 4) # Округляем до шага лота Bybit (4 знака)
+            pos_size_btc = round(cash_risk / tp_sl_size, 4) # Округляем до 4 знаков под спецификацию Bybit
 
             if pos_size_btc == 0:
                 pos_size_btc = 0.0001 # минимальный лот BTC на деривативах
 
-            try:
-                side_to_open = "buy" if current_position == 1 else "sell"
-                print(f"📡 [LIVE SIGNAL] Вхожу в {side_to_open.upper()}! Цена: {current_price:.2f} | Объем: {pos_size_btc} BTC | Вероятность: {max(proba_up, proba_down):.2f}")
+                # РАССЧИТЫВАЕМ ЦЕНЫ ДЛЯ БИРЖИ СТРОГО ПО НАШЕЙ МАТЕМАТИКЕ
+            if current_position == 1: # LONG
+                tp_price = entry_price + tp_sl_size
+                sl_price = entry_price - tp_sl_size
+                side_to_open = "buy"
+            else: # SHORT
+                tp_price = entry_price - tp_sl_size
+                sl_price = entry_price + tp_sl_size
+                side_to_open = "sell"
 
-                # Боевой API-запрос на Bybit (Рыночный ордер входа)
-                order = await exchange.create_market_order(symbol, side_to_open, pos_size_btc, params={"category": "linear"})
-                print(f"✅ Позиция успешно ОТКРЫТА! ID: {order['id']}")
+            try:
+                print(f"📡 [LIVE SIGNAL] Отправляю ордер в {side_to_open.upper()}! Объем: {pos_size_btc} BTC")
+                print(f"🎯 Назначаю биржевые цели -> TP: ${tp_price:.1f} | SL: ${sl_price:.1f}")
+
+                # ИСПРАВЛЕНО: Шлем ордер на вход СРАЗУ с жестким тейком и стопом в параметрах!
+                order = await exchange.create_market_order(
+                    symbol,
+                    side_to_open,
+                    pos_size_btc,
+                    params={
+                        "category": "linear",
+                        "takeProfit": f"{tp_price:.1f}",
+                        "stopLoss": f"{sl_price:.1f}"
+                    }
+                )
+                print(f"✅ Позиция успешно ОТКРЫТА с защитой TP/SL на Bybit! ID: {order['id']}")
             except Exception as e:
-                print(f"❌ Ошибка отправки ордера открытия на Bybit: {e}")
+                print(f"❌ Ошибка отправки защищенного ордера на Bybit: {e}")
                 current_position = 0
                 pos_size_btc = 0.0
 
