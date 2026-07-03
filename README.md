@@ -240,10 +240,18 @@ Upload model
 scp -i /home/nizami/.ssh/key2 lgbm_live_model.pkl root@157.180.16.28:/root/projects/market_telemetry
 ```
 
-Upload traider
+Upload live trader
 ```shell
 scp -i /home/nizami/.ssh/key2 bybit_live_trader.py root@157.180.16.28:/root/projects/market_telemetry
 ```
+
+Upload paper trader
+```shell
+
+cd /home/nizami/projects/python/market_telemetry/src/market_telemetry/prod && 
+scp -i /home/nizami/.ssh/key2 bybit_paper_trader.py root@157.180.16.28:/root/projects/market_telemetry
+```
+
 
 Upload config
 ```shell

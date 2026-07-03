@@ -7,6 +7,7 @@ import collections
 import ccxt.pro as ccxt
 import os
 import logging
+import aiohttp  # Добавлен недостающий импорт для работы Telegram
 
 # =====================================================================
 # 1. СИСТЕМНОЕ ЛОГИРОВАНИЕ (ВЫДЕЛЕННЫЙ ЖУРНАЛ СДЕЛКИ)
@@ -14,13 +15,11 @@ import logging
 logging.basicConfig(
     filename='paper_trading.log',
     level=logging.INFO,
-
-
     format='%(asctime)s | %(levelname)s | %(message)s',
     datefmt='%Y-%m-%d %H:%M:%S'
 )
 
-# 🎯 Вычисляем пути конфигурации
+# Вычисляем пути конфигурации
 current_dir = os.path.dirname(os.path.abspath(__file__))
 config_path = os.path.join(current_dir, "config.ini")
 
@@ -37,8 +36,40 @@ trade_count_10s = 0
 # Очередь для расчета скользящих макро-окон прямо в RAM (максимум за 1 час = 360 тиков)
 history_buffer = collections.deque(maxlen=360)
 
+
 # =====================================================================
-# 2. ДВИЖОК ЭМУЛЯЦИИ ТОРГОВЛИ (PAPER TRADING ENGINE)
+# 2. АСИНХРОННЫЙ ОТПРАВИТЕЛЬ TELEGRAM NOTIFICATION
+# =====================================================================
+async def send_paper_telegram_alert(text: str):
+    """Легковесный асинхронный отправитель алертов"""
+    local_config = configparser.ConfigParser()
+    local_config.read("config.ini")
+
+    try:
+        token = local_config.get("TELEGRAM", "bot_token")
+        chat_id = local_config.get("TELEGRAM", "chat_id")
+    except Exception as e:
+        print(f"⚠️ Ошибка чтения секции [TELEGRAM] в config.ini: {e}")
+        return
+
+    url = f"https://api.telegram.org/bot{token}/sendMessage"
+    payload = {
+        "chat_id": chat_id,
+        "text": text,
+        "parse_mode": "Markdown"
+    }
+
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.post(url, json=payload) as response:
+                if response.status != 200:
+                    print(f"⚠️ Ошибка отправки в TG: {response.status}")
+    except Exception as e:
+        print(f"❌ Сбой сети Telegram API: {e}")
+
+
+# =====================================================================
+# 3. ДВИЖОК ЭМУЛЯЦИИ ТОРГОВЛИ (PAPER TRADING ENGINE)
 # =====================================================================
 class PaperExecutor:
     def __init__(self, initial_balance=10000.0, taker_fee=0.0006):
@@ -50,9 +81,10 @@ class PaperExecutor:
 
         print(f"\n[INIT] === ИНИЦИАЛИЗАЦИЯ PAPER TRADING ===")
         print(f"[INIT] Стартовый виртуальный баланс: ${self.balance:.2f} USDT")
+
         logging.info(f"=== РОБОТ ИНИЦИАЛИЗИРОВАН. СТАРТОВЫЙ БАЛАНС: ${self.balance:.2f} ===")
 
-    def open_position(self, direction, price, tp_sl_size, risk_per_trade):
+    def open_position(self, direction, price, tp_sl_size, risk_per_trade, confidence):
         """Эмуляция открытия позиции с жестким риск-менеджментом"""
         self.current_position = direction
         self.entry_price = price
@@ -76,7 +108,17 @@ class PaperExecutor:
         print(msg)
         logging.info(msg)
 
-    def close_position(self, price, action_str):
+        # Формируем красивый алерт для Telegram
+        alert_msg = (
+            f"📝 *PAPER TRADING: ВХОД В РЫНОК*\n"
+            f"• Направление: `{pos_str}`\n"
+            f"• Цена входа: `${price:,.2f}`\n"
+            f"• Уверенность ИИ: `{confidence * 100:.1f}%`\n"
+            f"• Виртуальный баланс: `${self.balance:,.2f} USDT`"
+        )
+        asyncio.create_task(send_paper_telegram_alert(alert_msg))
+
+    def close_position(self, price, action_str, confidence):
         """Эмуляция закрытия позиции и фиксация прибыли/убытка"""
         pnl = 0.0
         if self.current_position == 1:  # LONG
@@ -86,14 +128,26 @@ class PaperExecutor:
 
         # Вычитаем комиссию за выход
         fee = (price * self.pos_size_btc) * self.fee_rate
-        self.balance += (pnl - fee)
+        net_pnl = pnl - fee
+        self.balance += net_pnl
 
         msg = (f"🔄 [{action_str}] | Вход: {self.entry_price:.2f} -> Выход: {price:.2f} | "
-               f"Чистый PnL: ${pnl - fee:+.4f} | Комиссия: ${fee:.4f} | Новый Баланс: ${self.balance:.2f}")
+               f"Чистый PnL: ${net_pnl:+.4f} | Комиссия: ${fee:.4f} | Новый Баланс: ${self.balance:.2f}")
         print(msg)
         logging.info(msg)
 
-        # Сброс параметров
+        status_icon = "🟢" if net_pnl > 0 else "🔴"
+        alert_msg = (
+            f"{status_icon} *PAPER TRADING: ЗАКРЫТИЕ ПОЗИЦИИ*\n"
+            f"• Результат: `{action_str}`\n"
+            f"• Цена выхода: `${price:,.2f}`\n"
+            f"• Финансовый итог: `{net_pnl:+.2f} USDT`\n"
+            f"• Уверенность ИИ в моменте: `{confidence * 100:.1f}%`\n"
+            f"• Текущий баланс: `${self.balance:,.2f} USDT`"
+        )
+        asyncio.create_task(send_paper_telegram_alert(alert_msg))
+
+        # Сброс параметров позиции после отправки алерта
         self.current_position = 0
         self.entry_price = 0.0
         self.pos_size_btc = 0.0
@@ -102,8 +156,9 @@ class PaperExecutor:
 # Инициализация виртуального движка торговли
 paper_engine = PaperExecutor(initial_balance=10000.0)
 
+
 # =====================================================================
-# 3. АСИНХРОННЫЕ СЛУШАТЕЛИ ВЕБ-СОКЕТОВ (CCXT.PRO)
+# 4. АСИНХРОННЫЕ СЛУШАТЕЛИ ВЕБ-СОКЕТОВ (CCXT.PRO)
 # =====================================================================
 async def order_book_listener(exchange, symbol):
     global latest_order_book
@@ -130,8 +185,9 @@ async def trades_listener(exchange, symbol):
             print(f"❌ Ошибка WS ленты сделок: {e}")
             await asyncio.sleep(2)
 
+
 # =====================================================================
-# 4. ТОРГОВОЕ ЯДРО С РАСЧЕТОМ ФИЧЕЙ И МОДЕЛЬЮ
+# 5. ТОРГОВОЕ ЯДРО С РАСЧЕТОМ ФИЧЕЙ И МОДЕЛЬЮ
 # =====================================================================
 async def execution_engine(symbol):
     global latest_order_book, trade_volume_buy_10s, trade_volume_sell_10s, trade_count_10s, config, current_dir, config_path
@@ -146,6 +202,8 @@ async def execution_engine(symbol):
 
     model = joblib.load(model_path)
     print("🚀 Виртуальный торговый движок запущен и ждет наполнения RAM-буфера...")
+    print(f"\n[INIT] === SENDING TELEGRAM NOTIFICATION ===")
+    asyncio.create_task(send_paper_telegram_alert("The paper trading engine is ready!"))
 
     while True:
         await asyncio.sleep(10)  # Сетка — 10 секунд
@@ -243,10 +301,13 @@ async def execution_engine(symbol):
         proba_up   = preds_proba[0, 2]
 
         signal = 0
+        current_confidence = 0.0
         if proba_up > threshold:
             signal = 1
+            current_confidence = proba_up
         elif proba_down > threshold:
             signal = -1
+            current_confidence = proba_down
 
         # -----------------------------------------------------------------
         # СКВОЗНАЯ СИМУЛЯЦИЯ КОНТУРА ВЫХОДОВ И ВХОДОВ (Зеркально живому боту)
@@ -287,20 +348,25 @@ async def execution_engine(symbol):
                     is_closed = True
 
             if is_closed:
-                paper_engine.close_position(execution_price, action_label)
+                # Передаем уверенность ИИ на момент закрытия (для алертов)
+                closing_conf = proba_down if paper_engine.current_position == 1 else proba_up
+                paper_engine.close_position(execution_price, action_label, closing_conf)
                 continue
 
         # Логика виртуального входа (только вне рынка)
         if paper_engine.current_position == 0 and signal != 0:
             # На демо-счете входим строго по Аску для LONG или по Биду для SHORT (честный спред!)
             entry_price_side = current_ask if signal == 1 else current_bid
-            paper_engine.open_position(signal, entry_price_side, tp_sl_size, risk_per_trade)
+            paper_engine.open_position(signal, entry_price_side, tp_sl_size, risk_per_trade, current_confidence)
 
         # Журналирование текущего состояния в консоль сервера
         print(f"[{pd.Timestamp.now().strftime('%H:%M:%S')}] Цена: {current_price:.1f} | "
               f"U/F/D: {proba_up:.2f}/{proba_flat:.2f}/{proba_down:.2f} | Сигнал: {signal} | Вирт_Поз: {paper_engine.current_position}")
 
 
+# =====================================================================
+# 6. ТОЧКА ВХОДА В ПРИЛОЖЕНИЕ
+# =====================================================================
 async def main():
     # Используем публичное WebSocket-подключение без ключей для эмуляции
     exchange = ccxt.bybit({"enableRateLimit": True, "options": {"defaultType": "linear"}})

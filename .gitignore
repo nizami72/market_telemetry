@@ -14,3 +14,4 @@
 /data/multidim_market_data.csv
 /data/lgbm_backtest_model.pkl
 /data/lgbm_live_model.pkl
+/src/market_telemetry/prod/paper_trading.log
