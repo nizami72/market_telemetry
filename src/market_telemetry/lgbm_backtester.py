@@ -20,7 +20,7 @@ def run_lgbm_fixed_backtester():
         print(f"❌ Ошибка загрузки файлов: {e}")
         return
 
-    threshold = config.getfloat("BACKTESTER", "threshold")
+    threshold = config.getfloat("BACKTESTER", "confidence_threshold")
     initial_balance = config.getfloat("BACKTESTER", "initial_balance")
     tp_sl_size = config.getfloat("BACKTESTER", "tp_sl_size")
     risk_per_trade = config.getfloat("BACKTESTER", "risk_per_trade")

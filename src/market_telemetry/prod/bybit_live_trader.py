@@ -105,7 +105,7 @@ async def execution_engine(exchange, symbol):
         config = configparser.ConfigParser()
         config.read(config_path)
         try:
-            threshold = config.getfloat("BACKTESTER", "threshold")
+            threshold = config.getfloat("BACKTESTER", "confidence_threshold")
             tp_sl_size = config.getfloat("BACKTESTER", "tp_sl_size")
             risk_per_trade = config.getfloat("BACKTESTER", "risk_per_trade")
         except Exception as e:

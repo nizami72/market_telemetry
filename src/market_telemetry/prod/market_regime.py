@@ -86,7 +86,7 @@ def detect_and_save_market_regime(window_hours=24):
         config.set("LABELER", "data_thinning_step", str(thinning_step))
 
         config.set("BACKTESTER", "confidence_threshold", str(threshold))
-        config.set("BACKTESTER", "tp_sl_size", str(noise_threshold)) # Синхронизируем цели
+        config.set("BACKTESTER", "tp_sl_size", str(noise_threshold)) # Синхронизируем тейки/стопы робота
         config.set("BACKTESTER", "market_regime", regime_name)
 
         with open(config_file, "w", encoding="utf-8") as f:
