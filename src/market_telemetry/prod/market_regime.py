@@ -20,11 +20,11 @@ def detect_and_save_market_regime(window_hours=24):
     try:
         # Читаем конфиг, чтобы узнать, где лежит сырой CSV логгера
         config.read(config_file)
-        if not config.has_option("LABELER", "csv_file_raw"):
-            print("❌ Ошибка: В конфиге не задан параметр [LABELER] -> csv_file_raw")
+        if not config.has_option("LABELER", "csv_filerow_data"):
+            print("❌ Ошибка: В конфиге не задан параметр [LABELER] -> csv_filerow_data")
             return
 
-        csv_path = config.get("LABELER", "csv_file_raw")
+        csv_path = config.get("LABELER", "csv_filerow_data")
         print(f"🧐 Конфиг подгружен. Анализирую фазу рынка по файлу: {csv_path}...")
 
         if not os.path.exists(csv_path):
