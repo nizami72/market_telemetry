@@ -2,7 +2,7 @@ import numpy as np
 import pandas as pd
 import configparser
 # 🚨 ИМПОРТИРУЕМ НАШ НОВЫЙ МОДУЛЬ
-from market_regime import detect_market_regime
+from market_regime import detect_and_save_market_regime
 
 
 def make_impulse_time_machine():
@@ -11,35 +11,23 @@ def make_impulse_time_machine():
     config.read("config.ini")
 
     # Базовый путь к сырым данным
-    csv_fileRow_data = config.get("LABELER", "csv_fileRow_data")
+    csv_file_row_data = config.get("LABELER", "csv_filerow_data")
     look_ahead = config.getint("LABELER", "look_ahead")
 
     # ==========================================
-    # 🧠 ДИНАМИЧЕСКИЙ АПГРЕЙД КОНФИГУРАЦИИ
+    # 🧠 Update config file
     # ==========================================
-    # Вызываем анализатор, который вернет настройки под текущий рынок
-    dyn_noise_threshold, dyn_thinning_step, dyn_threshold = detect_market_regime(csv_fileRow_data)
+    detect_and_save_market_regime(24)
+    config.read("config.ini") # Перечитываем апдейты!
 
-    # Записываем динамические параметры в локальные переменные для разметчика
-    noise_threshold = dyn_noise_threshold
-    thinning_step = dyn_thinning_step
+    # 🔧 Получаем динамические параметры
+    noise_threshold = config.getfloat("LABELER", "noise_threshold")
+    thinning_step = config.getint("LABELER", "data_thinning_step")
+    # ==========================================
 
-    # 🚨 ПЕРЕЗАПИСЫВАЕМ CONFIG.INI ДЛЯ ОБУЧЕНИЯ И БЭКТЕСТЕРА
-    config.set("LABELER", "noise_threshold", str(dyn_noise_threshold))
-    config.set("LABELER", "data_thinning_step", str(dyn_thinning_step))
-    config.set("BACKTESTER", "threshold", str(dyn_threshold))
-    config.set("BACKTESTER", "tp_sl_size", str(dyn_noise_threshold)) # Тейк равен макро-цели рынка
-
-    with open("config.ini", "w") as configfile:
-        config.write(configfile)
-
-    print(f"💾 config.ini успешно обновлен на лету!")
-    print(f"🎯 Рабочие параметры: Цель=${noise_threshold} | Шаг={thinning_step} | Порог ИИ={dyn_threshold}")
-    # ===========================================
-
-    print(f"📖 Читаем сырой файл {csv_fileRow_data}...")
+    print(f"📖 Читаем сырой файл {csv_file_row_data}...")
     try:
-        df = pd.read_csv(csv_fileRow_data)
+        df = pd.read_csv(csv_file_row_data)
     except FileNotFoundError:
         print("❌ Файл не найден.")
         return
@@ -99,6 +87,7 @@ def make_impulse_time_machine():
     df["price_change_5m"] = (df["price"] - df["price"].shift(30)).fillna(0)
     df["price_change_1h"] = (df["price"] - df["price"].shift(360)).fillna(0)
 
+    # Перенес филзна ниже, чтобы не забить нулями будущие сдвиги по приколу
     df = df.fillna(0.0)
     # ==========================================
 
@@ -108,7 +97,7 @@ def make_impulse_time_machine():
     df["future_price"] = df["price"].shift(-look_ahead)
     df["price_change"] = df["future_price"] - df["price"]
 
-    # Используем динамически определенный порог noise_threshold
+    # Теперь noise_threshold объявлен и код не упадет
     conditions = [
         (df["price_change"] > noise_threshold),
         (df["price_change"] < -noise_threshold),
@@ -117,6 +106,7 @@ def make_impulse_time_machine():
 
     df["label_next_price"] = np.select(conditions, choices, default=0)
 
+    # Очищаем только реальные NaN от shift
     df_cleaned = df.dropna(
         subset=["future_price", "imb_20_velocity", "speed_zscore"]
     ).copy()

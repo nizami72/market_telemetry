@@ -9,17 +9,61 @@ from sklearn.metrics import log_loss, roc_auc_score
 
 warnings.filterwarnings('ignore', category=UserWarning)
 
+def prepare_sliced_dataset(config_path="config.ini"):
+    """
+    Выделенная функция загрузки данных.
+    Вырезает скользящее или фиксированное окно длиной N дней, начиная с даты d.
+    """
+    config = configparser.ConfigParser()
+    config.read(config_path)
+
+    csv_file = config.get("MARKET_DATA", "csv_file")
+    start_date_str = config.get("MARKET_DATA", "start_date")
+    slice_days = config.getint("MARKET_DATA", "slice_days")
+
+    print(f"辨 Загружаю датасет {csv_file}...")
+    df = pd.read_csv(csv_file)
+
+    # Приводим к datetime и гарантируем строгую хронологию
+    df["timestamp"] = pd.to_datetime(df["timestamp"])
+    df = df.sort_values("timestamp").reset_index(drop=True)
+
+    # 1. Точка старта d
+    start_boundary = pd.to_datetime(start_date_str)
+
+    # 2. Вычисляем точку окончания: start_date + N дней
+    end_boundary = start_boundary + pd.Timedelta(days=slice_days)
+
+    print(f"⏳ Фильтрация окна: с {start_boundary} по {end_boundary} ({slice_days} дней)...")
+
+    # 3. Делаем временной срез данных
+    df_sliced = df[(df["timestamp"] >= start_boundary) & (df["timestamp"] <= end_boundary)].reset_index(drop=True)
+
+    if df_sliced.empty or len(df_sliced) < 100:
+        print(f"❌ Критическая ошибка: в интервале дней найдено всего {len(df_sliced)} строк! Проверь даты.")
+        return None
+
+    # Полезная статистика для контроля тиков в консоли
+    total_ticks = len(df_sliced)
+    print(f"✅ Срез сформирован. Получено строк: {total_ticks}")
+    print(f"📅 Фактические границы выборки: с {df_sliced['timestamp'].min()} по {df_sliced['timestamp'].max()}")
+
+    return df_sliced
+
+
 def train_lgbm():
     config = configparser.ConfigParser()
     config.read("config.ini")
 
-    csv_file = config.get("MARKET_DATA", "csv_file")
     model_file_prod = config.get("MARKET_DATA", "model_file_prod")
     model_file_test = config.get("MARKET_DATA", "model_file_test")
 
-    print(f"📖 Загружаю датасет {csv_file} для LightGBM...")
-    df = pd.read_csv(csv_file)
+    # Вызываем нашу новую изолированную функцию выборки данных
+    df = prepare_sliced_dataset()
+    if df is None:
+        return
 
+    # Список фичей
     feature_cols = [
         "imbalance_5", "imbalance_20", "imbalance_50",
         "market_delta_10s", "trade_speed_10s", "speed_zscore",
@@ -31,17 +75,14 @@ def train_lgbm():
     ]
 
     X = df[feature_cols].values
-    y = df["label_next_price"].values + 1
+    y = df["label_next_price"].values + 1  # Сдвиг классов под LightGBM [0, 1, 2]
 
-    # -------------------------------------------------------------------------
-    # АРХИТЕКТУРНОЕ ИСПРАВЛЕНИЕ: Выделяем 80% данных для построения бэктест-модели
-    # Кросс-валидация должна крутиться СТРОГО внутри этих 80%!
-    # -------------------------------------------------------------------------
+    # Разделение на тренировочную выборку (80%) для кросс-валидации
     train_size = int(len(X) * 0.8)
     X_train_80, y_train_80 = X[:train_size], y[:train_size]
 
     tscv = TimeSeriesSplit(n_splits=5)
-    print("🏋️‍♂️ Начинаю валидацию LightGBM на временных рядах (внутри тренировочных 80% данных)...")
+    print("🏋️‍♂️ Начинаю кросс-валидацию LightGBM на временных рядах...")
 
     params = {
         "objective": "multiclass",
@@ -60,7 +101,6 @@ def train_lgbm():
     oof_auc = []
     best_iterations = []
 
-    # Запускаем split строго по тренировочной выборке
     for fold, (train_idx, test_idx) in enumerate(tscv.split(X_train_80)):
         X_fold_train, X_fold_val = X_train_80[train_idx], X_train_80[test_idx]
         y_fold_train, y_fold_val = y_train_80[train_idx], y_train_80[test_idx]
@@ -96,24 +136,15 @@ def train_lgbm():
 
     optimal_trees = int(np.mean(best_iterations))
 
-    # -------------------------------------------------------------------------
-    # МОДЕЛЬ №1: ДЛЯ ЧЕСТНОГО БЭКТЕСТА (Обучаем строго на первых 80% данных)
-    # -------------------------------------------------------------------------
-    print(f"\n🛡️ Сборка модели для БЭКТЕСТЕРА (80% данных)...")
+    print(f"\n🛡️ Сборка модели для БЭКТЕСТЕРА (80% выборки)...")
     backtest_dataset = lgb.Dataset(X_train_80, label=y_train_80)
     backtest_model = lgb.train(params, backtest_dataset, num_boost_round=optimal_trees)
-
-    # Исправлено: пишем динамическое имя из конфига
     joblib.dump(backtest_model, model_file_test)
     print(f"💾 Файл '{model_file_test}' успешно создан.")
 
-    # -------------------------------------------------------------------------
-    # МОДЕЛЬ №2: ДЛЯ ЖИВОЙ ТОРГОВЛИ НА СЕРВЕРЕ (Обучаем на 100% данных)
-    # -------------------------------------------------------------------------
-    print(f"\n🚀 Сборка финальной модели для ПРОДАКШЕНА (100% данных)...")
+    print(f"\n🚀 Сборка финальной модели для ПРОДАКШЕНА (100% выборки)...")
     full_train_data = lgb.Dataset(X, label=y)
     final_model = lgb.train(params, full_train_data, num_boost_round=optimal_trees)
-
     joblib.dump(final_model, model_file_prod)
     print(f"💾 Файл '{model_file_prod}' успешно создан.")
 

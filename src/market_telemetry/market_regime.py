@@ -24,7 +24,7 @@ def detect_and_save_market_regime(window_hours=24):
             print("❌ Ошибка: В конфиге не задан параметр [LABELER] -> csv_filerow_data")
             return
 
-        csv_path = config.get("LABELER", "csv_file_raw")
+        csv_path = config.get("LABELER", "csv_filerow_data")
         print(f"🧐 Конфиг подгружен. Анализирую фазу рынка по файлу: {csv_path}...")
 
         if not os.path.exists(csv_path):
@@ -32,16 +32,23 @@ def detect_and_save_market_regime(window_hours=24):
             return
 
         # =====================================================================
-        # 🔬 МАНЕВР PANDAS: ЧТЕНИЕ БЕЗ ЗАГОЛОВКОВ ПО ИНДЕКСАМ КОЛОНОК
+        # 2. БЕЗОПАСНОЕ ЧТЕНИЕ С ЗАГОЛОВКАМИ (Защита от Mixed Types и грязных строк)
         # =====================================================================
-        # header=None говорит, что первой строки с именами нет
-        # usecols=[0, 1] загружает только 1-ю (timestamp) и 2-ю (price) колонки
-        df = pd.read_csv(csv_path, header=None, usecols=[0, 1], names=["timestamp", "price"])
+        # Читаем строго нужные колонки как текст, полностью исключая Mixed types DtypeWarning
+        df = pd.read_csv(csv_path, usecols=["timestamp", "price"], dtype={"timestamp": str, "price": str})
 
-        df["timestamp"] = pd.to_datetime(df["timestamp"])
+        # 🔥 КАПКАН НА МУСОР: Удаляем текстовые строки заголовков, если они продублировались при склейке логов
+        df = df[df["timestamp"] != "timestamp"].copy()
+
+        # Принудительно переводим типы данных в правильный формат. Мусор превращается в NaN
+        df["price"] = pd.to_numeric(df["price"], errors='coerce')
+        df["timestamp"] = pd.to_datetime(df["timestamp"], errors='coerce')
+
+        # Чистим строки с NaN, чтобы не сломать математическое ядро Ohlc
+        df.dropna(subset=["timestamp", "price"], inplace=True)
         df.set_index("timestamp", inplace=True)
 
-        # Берем временной срез за последние 24 часа
+        # Выделяем временной срез за последние 24 часа
         last_time = df.index.max()
         start_time = last_time - pd.Timedelta(hours=window_hours)
         df_slice = df.loc[start_time:last_time]
@@ -50,8 +57,9 @@ def detect_and_save_market_regime(window_hours=24):
             print("⚠️ Недостаточно свежих тиков для анализа. config.ini оставлен без изменений.")
             return
 
-        # 2. Магия ресемплинга: агрегируем 10-секундные тики в 15-минутные свечи
+        # 3. Ресемплинг: агрегируем 10-секундные тики в 15-минутные свечи
         resampled = df_slice["price"].resample("15Min").ohlc()
+        resampled.dropna(inplace=True)
 
         # Считаем средний размах (волатильность) одной свечи в долларах (ATR)
         avg_candle_range = (resampled["high"] - resampled["low"]).mean()
@@ -65,19 +73,19 @@ def detect_and_save_market_regime(window_hours=24):
         # ДВУХУРОВНЕВАЯ АВТО-МАТЕМАТИКА РЕЖИМОВ:
         if avg_candle_range > 150.0:
             noise_threshold = 450.0
-            thinning_step = 90      # Разряжаем сильнее под макро-тренды
-            threshold = 0.42        # Повышаем планку уверенности для ИИ (3 класса)
+            thinning_step = 90      # Сильное разрежение под макро-тренды (раз в 15 минут)
+            threshold = 0.42        # Повышаем планку уверенности для ИИ в Шторм
             regime_name = "ШТОРМ (ВЫСОКАЯ ВОЛАТИЛЬНОСТЬ)"
         else:
             noise_threshold = 300.0
-            thinning_step = 45      # Берем плотнее под микро-паттерны
-            threshold = 0.39        # Чуть снижаем порог для флэта
+            thinning_step = 45      # Плотный сбор под микро-паттерны (раз в 7.5 минут)
+            threshold = 0.42        # Снижаем планку уверенности под зажатый флэт
             regime_name = "ШТИЛЬ (НИЗКАЯ ВОЛАТИЛЬНОСТЬ)"
 
         print(f"🔥 АКТИВИРОВАН РЕЖИМ: {regime_name}")
 
         # =====================================================================
-        # 💾 ЖЕСТКАЯ ПЕРЕЗАПИСЬ CONFIG.INI НА ДИСКЕ VPS
+        # 4. 💾 ЖЕСТКАЯ ЗАПИСЬ CONFIG.INI НА ЖЕСТКИЙ ДИСК VPS
         # =====================================================================
         if not config.has_section("LABELER"): config.add_section("LABELER")
         if not config.has_section("BACKTESTER"): config.add_section("BACKTESTER")
@@ -86,9 +94,10 @@ def detect_and_save_market_regime(window_hours=24):
         config.set("LABELER", "data_thinning_step", str(thinning_step))
 
         config.set("BACKTESTER", "confidence_threshold", str(threshold))
-        config.set("BACKTESTER", "tp_sl_size", str(noise_threshold)) # Синхронизируем цели
+        config.set("BACKTESTER", "tp_sl_size", str(noise_threshold)) # Синхронизируем тейки/стопы робота
         config.set("BACKTESTER", "market_regime", regime_name)
 
+        # Физически сохраняем изменения на диск
         with open(config_file, "w", encoding="utf-8") as f:
             config.write(f)
 
@@ -99,18 +108,22 @@ def detect_and_save_market_regime(window_hours=24):
         # 📢 УВЕДОМЛЕНИЕ В TELEGRAM (Только при реальной смене фазы рынка)
         # =====================================================================
         if old_regime != regime_name:
-            tg_message = (
-                f"🔄 *MLOps Контур: Смена режима рынка!*\n\n"
-                f"📊 *ATR 24h:* ${avg_candle_range:.2f}\n"
-                f"⚙️ *Новая фаза:* `{regime_name}`\n"
-                f"🎯 *Параметры ИИ:* Цель=${noise_threshold} | Порог={threshold}"
+            alert_text = (
+                f"🚨 *Контур MLOps: Смена фазы рынка!*\n\n"
+                f"• *Новый regime:* `{regime_name}`\n"
+                f"• *BTC ATR (24h):* `${avg_candle_range:.2f}`\n"
+                f"• *Установленные цели (TP/SL):* `${noise_threshold}`\n"
+                f"• *Порог ИИ (Confidence):* `{threshold}`\n"
+                f"• *Шаг разрежения матрицы:* `{thinning_step}` тиков."
             )
-            send_telegram_alert_sync(tg_message)
+            send_telegram_alert_sync(alert_text)
             print("📢 Уведомление о смене режима отправлено в Telegram.")
         # =====================================================================
 
     except Exception as e:
-        print(f"❌ Ошибка внутри модуля market_regime: {e}. Конфиг не изменен.")
+        error_msg = f"❌ Ошибка внутри модуля market_regime: {e}. Конфиг не изменен."
+        print(error_msg)
+        send_telegram_alert_sync(f"⚠️ *Критический сбой market_regime.py!*\nОшибка: `{e}`")
 
 if __name__ == "__main__":
     detect_and_save_market_regime()

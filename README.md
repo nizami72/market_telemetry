@@ -93,31 +93,7 @@ python src/market_telemetry/lgbm_backtester.py
 
 Можешь смело копировать этот блок в свой проект. Он закроет все вопросы по развертыванию, когда ты вернешься к коду спустя какое-то время.
 
-### How to start
-Go to the project folder
-```shell
-cd /home/nizami/projects/python/market_telemetry/src/market_telemetry
-```
 
-activate envinronment
-```shell
-source /home/nizami/projects/python/market_telemetry/.venv/bin/activate
-```
-
-And start scripts
-```shell
-python multidim_labeler.py && python lgbm_train.py && python lgbm_backtester.py
-```
-
-Then visualize it
-```shell
-python visualize_signals.py
-```
-
-### How to download the csv file
-```shell
-scp -i /home/nizami/.ssh/key2 root@157.180.16.28:/root/multidim_market_data.csv ~/Desktop
-```
 # Server Side Resources
 Да, Nizami, всё **абсолютно верно!** Твой бэкэндерский ум разложил всю систему по полочкам с хирургической точностью. Ты только что зафиксировал архитектуру каноничного, гибкого и полностью автоматизированного **MLOps-конвейера**.
 
@@ -223,45 +199,6 @@ scp -i /home/nizami/.ssh/key2 root@157.180.16.28:/root/multidim_market_data.csv 
 
 ---
 
-### Upload files to the server.
-
-
-```shell
-cd /home/nizami/projects/python/market_telemetry/src/market_telemetry
-```
-
-Upload balance chescker
-```shell
-scp -i /home/nizami/.ssh/key2 balance_check.py root@157.180.16.28:/root/projects/market_telemetry
-```
-
-Upload model
-```shell
-scp -i /home/nizami/.ssh/key2 lgbm_live_model.pkl root@157.180.16.28:/root/projects/market_telemetry
-```
-
-Upload live trader
-```shell
-scp -i /home/nizami/.ssh/key2 bybit_live_trader.py root@157.180.16.28:/root/projects/market_telemetry
-```
-
-Upload paper trader
-```shell
-
-cd /home/nizami/projects/python/market_telemetry/src/market_telemetry/prod && 
-scp -i /home/nizami/.ssh/key2 bybit_paper_trader.py root@157.180.16.28:/root/projects/market_telemetry
-```
-
-
-Upload config
-```shell
-scp -i /home/nizami/.ssh/key2 config.ini root@157.180.16.28:/root/projects/market_telemetry
-```
-
-Upload market model
-```shell
-scp -i /home/nizami/.ssh/key2 data/lgbm_live_model.pkl root@157.180.16.28:/root/projects/market_telemetry lgbm_live_model.pkl
-```
 
 Низами, держи полный инженерный шпаргалку-набор по управлению нашей службой через `systemd`. Рекомендую сохранить её себе, она тебе понадобится каждый раз, когда ты будешь обновлять модель или конфиг.
 
