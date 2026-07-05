@@ -99,7 +99,7 @@ ___
 ### How to Manage Paper Tariding Service
 
 
-Logs
+Logs Paper Trader
 ```shell
   sudo journalctl -u bybit-paper.service -f -n 50
 ```
