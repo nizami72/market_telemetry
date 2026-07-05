@@ -38,7 +38,7 @@ def detect_and_save_market_regime(window_hours=24):
         # usecols=[0, 1] загружает только 1-ю (timestamp) и 2-ю (price) колонки
         df = pd.read_csv(csv_path, header=None, usecols=[0, 1], names=["timestamp", "price"])
 
-        df["timestamp"] = pd.to_datetime(df["timestamp"])
+        df["timestamp"] = pd.to_datetime(df["timestamp"], format="mixed", utc=True)
         df.set_index("timestamp", inplace=True)
 
         # Берем временной срез за последние 24 часа
