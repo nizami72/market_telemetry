@@ -1,141 +1,128 @@
 import asyncio
+import csv
 import os
+import traceback
 import ccxt.pro as ccxt
-import pandas as pd
+from datetime import datetime, timezone
 
-# --- ГЛОБАЛЬНЫЕ ХРАНИЛИЩА ДЛЯ ОБМЕНА ДАННЫМИ МЕЖДУ ПОТОКАМИ ---
-latest_order_book = None
-trade_volume_buy_10s = 0.0
-trade_volume_sell_10s = 0.0
-trade_count_10s = 0
+class MarketState:
+    def __init__(self):
+        self.order_book = None
+        self.buy = 0.0
+        self.sell = 0.0
+        self.count = 0
+        self.lock = asyncio.Lock()
+        self.seen = set()
 
+state = MarketState()
 
-# 1. ПРОДУЦЕНТ СТАКАНА: непрерывно слушает намерения игроков
 async def order_book_producer(exchange, symbol):
-    global latest_order_book
     while True:
         try:
-            # Запрашиваем лимит 50, разрешенный биржей Bybit
-            latest_order_book = await exchange.watch_order_book(symbol, limit=50)
-        except Exception as e:
-            print(f"❌ Ошибка WebSocket стакана: {e}")
+            ob = await exchange.watch_order_book(symbol, limit=50)
+            async with state.lock:
+                state.order_book = ob  # Быстрое присвоение ссылки вместо deepcopy
+        except Exception:
+            traceback.print_exc()
             await asyncio.sleep(2)
 
-
-# 2. ПРОДУЦЕНТ ЛЕНТЫ СДЕЛОК: непрерывно замеряет кинетический ток
 async def trades_producer(exchange, symbol):
-    global trade_volume_buy_10s, trade_volume_sell_10s, trade_count_10s
     while True:
         try:
             trades = await exchange.watch_trades(symbol)
-            for trade in trades:
-                trade_count_10s += 1
-                volume = trade["amount"]  # Объем сделки в BTC
-                if trade["side"] == "buy":
-                    trade_volume_buy_10s += volume  # Рыночный ордер на покупку
-                else:
-                    trade_volume_sell_10s += volume  # Рыночный ордер на продажу
-        except Exception as e:
-            print(f"❌ Ошибка WebSocket ленты сделок: {e}")
+
+            # Инициализируем локальные переменные (считаем БЕЗ лока)
+            local_buy = 0.0
+            local_sell = 0.0
+            local_count = 0
+
+            for t in trades:
+                tid = t.get("id") or (t.get("timestamp"), t.get("price"), t.get("amount"), t.get("side"))
+
+                # Чтение/запись в state.seen внутри цикла допустимы,
+                # но для идеальной точности мы не блокируем весь сборщик
+                if tid in state.seen:
+                    continue
+                state.seen.add(tid)
+
+                if len(state.seen) > 10000:
+                    state.seen.clear()
+
+                amt = float(t.get("amount", 0))
+                if t.get("side") == "buy":
+                    local_buy += amt
+                elif t.get("side") == "sell":
+                    local_sell += amt
+                local_count += 1
+
+            # ЗАХВАТЫВАЕМ ЛОК ОДИН РАЗ: переносим локальные агрегаты в глобальный стейт
+            if local_count > 0:
+                async with state.lock:
+                    state.buy += local_buy
+                    state.sell += local_sell
+                    state.count += local_count
+
+        except Exception:
+            traceback.print_exc()
             await asyncio.sleep(2)
 
+def imbalance(ob, depth):
+    bids = ob["bids"][:depth]
+    asks = ob["asks"][:depth]
+    bv = sum(p * v for p, v in bids)  # Математика взвешивания по цене (USDT объем)
+    av = sum(p * v for p, v in asks)
+    return round(bv / (bv + av), 4) if (bv + av) else 0.5
 
-# 3. ПОТРЕБИТЕЛЬ (ЗАПИСЬ): делает снимок датчиков каждые 10 секунд
-async def logger_consumer(symbol, csv_file):
-    global latest_order_book, trade_volume_buy_10s, trade_volume_sell_10s, trade_count_10s
-
-    print(
-        f"📡 Многомерный логгер запущен. Сбор данных в {csv_file} начал ход..."
-    )
-
-    # Инициализация структуры CSV, если файла нет
+async def logger_consumer(csv_file):
     if not os.path.exists(csv_file):
-        headers = [
-            "timestamp",
-            "price",
-            "imbalance_5",
-            "imbalance_20",
-            "imbalance_50",
-            "market_delta_10s",
-            "trade_speed_10s",
-            "label_next_price",
-        ]
-        pd.DataFrame(columns=headers).to_csv(csv_file, index=False)
+        with open(csv_file, "w", newline="\n") as f:
+            csv.writer(f).writerow([
+                "timestamp", "price", "imbalance_5", "imbalance_20",
+                "imbalance_50", "market_delta_10s", "trade_speed_10s", "label_next_price"
+            ])
 
     while True:
-        # Ждем ровно 10 секунд для формирования физического кванта времени
         await asyncio.sleep(10)
 
-        # Проверяем, успели ли продуценты собрать первые данные
-        if latest_order_book is None or trade_count_10s == 0:
-            print("⏳ Ожидание первого наполнения буфера данных от биржи...")
+        # Атомарный захват среза данных
+        async with state.lock:
+            ob = state.order_book.copy() if state.order_book else None
+            buy, sell, count = state.buy, state.sell, state.count
+            state.buy = state.sell = 0.0
+            state.count = 0
+
+        if ob is None or not ob["bids"] or not ob["asks"]:
             continue
 
-        timestamp = pd.Timestamp.now()
-        current_price = (
-                                latest_order_book["bids"][0][0] + latest_order_book["asks"][0][0]
-                        ) / 2
+        price = (ob["bids"][0][0] + ob["asks"][0][0]) / 2
+        timestamp = datetime.now(timezone.utc).isoformat(timespec="seconds")
 
-        # --- РАСЧЕТ ПРОСТРАНСТВЕННЫХ ФИЧ (СТАКАН) ---
-        def calc_imbalance(depth):
-            b_depth = sum([p * v for p, v in latest_order_book["bids"][:depth]])
-            a_depth = sum([p * v for p, v in latest_order_book["asks"][:depth]])
-            return round(b_depth / (b_depth + a_depth), 4) if (b_depth + a_depth) > 0 else 0.5
+        row = [
+            timestamp, price,
+            imbalance(ob, 5), imbalance(ob, 20), imbalance(ob, 50),
+            round(buy - sell, 4), count, ""
+        ]
 
-        imb_5 = calc_imbalance(5)
-        imb_20 = calc_imbalance(20)
-        imb_50 = calc_imbalance(50)
-
-        # --- РАСЧЕТ КИНЕТИЧЕСКИХ ФИЧ (ЛЕНТА) ---
-        # Дельта = Покупки минус Продажи. Плюс — давят покупатели, Минус — продавцы
-        market_delta = trade_volume_buy_10s - trade_volume_sell_10s
-        speed = trade_count_10s
-
-        # --- СБОР СТРОКИ ДАТА СЕТА ---
-        new_row = {
-            "timestamp": timestamp.strftime("%Y-%m-%d %H:%M:%S"),
-            "price": current_price,
-            "imbalance_5": imb_5,
-            "imbalance_20": imb_20,
-            "imbalance_50": imb_50,
-            "market_delta_10s": round(market_delta, 4),
-            "trade_speed_10s": speed,
-            "label_next_price": None,
-        }
-
-        # Пишем в лог терминала текущий срез физики
-        print(
-            f"[{timestamp.strftime('%H:%M:%S')}] Цена: {current_price:<8} | "
-            f"Imb(5/20/50): {imb_5:.2f}/{imb_20:.2f}/{imb_50:.2f} | "
-            f"Delta: {market_delta:>7.3f} BTC | Speed: {speed} т/10с"
-        )
-
-        # СБРОС И КЛИНИНГ БУФЕРА ЛЕНТЫ ДЛЯ СЛЕДУЮЩИХ 10 СЕКУНД
-        trade_volume_buy_10s = 0.0
-        trade_volume_sell_10s = 0.0
-        trade_count_10s = 0
-
-        # Сохранение в CSV
-        pd.DataFrame([new_row]).to_csv(csv_file, mode="a", header=False, index=False)
-
+        print(row)
+        with open(csv_file, "a", newline="\n") as f:
+            csv.writer(f).writerow(row)
 
 async def main():
-    # Создаем асинхронный инстанс Bybit
     exchange = ccxt.bybit({"enableRateLimit": True})
-    symbol = "BTC/USDT"
-    csv_file = "../../multidim_market_data.csv"
-
-    # Запускаем параллельные задачи (Workers) в фоне общего Event Loop
-    task_book = asyncio.create_task(order_book_producer(exchange, symbol))
-    task_trades = asyncio.create_task(trades_producer(exchange, symbol))
-    task_logger = asyncio.create_task(logger_consumer(symbol, csv_file))
-
-    # Держим main() активным, пока работает логгер
-    await task_logger
-
+    tasks = [
+        asyncio.create_task(order_book_producer(exchange, "BTC/USDT")),
+        asyncio.create_task(trades_producer(exchange, "BTC/USDT")),
+        asyncio.create_task(logger_consumer("../../multidim_market_data.csv"))
+    ]
+    try:
+        await asyncio.gather(*tasks)
+    finally:
+        for t in tasks:
+            t.cancel()
+        await exchange.close()
 
 if __name__ == "__main__":
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
-        print("\n🛑 Сбор данных остановлен пользователем.")
+        print("Stopped.")
