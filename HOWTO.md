@@ -6,6 +6,7 @@
 * [How to Train Model and Run Backtester](#how-to-train-model-and-run-backtester)
 * [How to Upload all Necessary Files on Hetzner](#how-to-upload-all-necessary-files-on-hetzner)
 * [How to Manage Paper Tariding Service](#how-to-manage-paper-tariding-service)
+* [How to Run any Python File](#how-to-run-any-python-file)
 ___
 
 ## Local Work
@@ -133,4 +134,32 @@ Open Service file
   sudo vim /etc/systemd/system/bybit-paper.service
 ```
 
+
+### How to Run any Python File in Prod
+
+```shell
+cd /home/nizami/projects/python/market_telemetry/src/market_telemetry/prod &&
+source /home/nizami/projects/python/market_telemetry/.venv/bin/activate &&
+python any_file.py
+````
+
+
+
 ## Remote Work
+
+### Download all log files of papaer traider
+
+Enter Hetzner
+```
+ssh -i /home/nizami/.ssh/key2 root@157.180.16.28
+``` 
+
+Create log files on hetzner
+```
+sudo journalctl -u bybit-paper.service > alllogs.txt
+```
+
+Download log file
+```bash
+scp -i /home/nizami/.ssh/key2 root@157.180.16.28:/root/alllogs.txt /home/nizami/logs/
+```
