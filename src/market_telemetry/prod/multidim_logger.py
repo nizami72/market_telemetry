@@ -1,5 +1,4 @@
 import asyncio
-import csv
 import os
 import traceback
 import ccxt.pro as ccxt
@@ -75,12 +74,14 @@ def imbalance(ob, depth):
     return round(bv / (bv + av), 4) if (bv + av) else 0.5
 
 async def logger_consumer(csv_file):
+
     if not os.path.exists(csv_file):
         with open(csv_file, "w", newline="\n") as f:
-            csv.writer(f).writerow([
+            headers = [
                 "timestamp", "price", "imbalance_5", "imbalance_20",
                 "imbalance_50", "market_delta_10s", "trade_speed_10s", "label_next_price"
-            ])
+            ]
+            f.write(",".join(headers) + "\n")
 
     last_clean_time = time.time()
 
@@ -111,7 +112,7 @@ async def logger_consumer(csv_file):
             f.write(','.join(map(str, row)) + '\n')
 
         # 2. Асинхронный запуск очистки раз в 10 минут (не блокирует сбор данных)
-        if time.time() - last_clean_time >= 15:
+        if time.time() - last_clean_time >= 10 * 60:
             asyncio.create_task(asyncio.to_thread(sync_maintain_sliding_window, csv_file))
             last_clean_time = time.time()
 
@@ -120,8 +121,8 @@ async def logger_consumer(csv_file):
 # Вынесли тяжелую очистку файла в отдельную синхронную функцию
 def sync_maintain_sliding_window(file_path):
     # Задаем окно как интервал timedelta
-    # WINDOW_SECONDS = timedelta(days=32, seconds=10)// todo
-    WINDOW_SECONDS = timedelta(seconds=100)
+    WINDOW_SECONDS = timedelta(days=32, seconds=10)
+    # WINDOW_SECONDS = timedelta(seconds=100)
 
     # Текущее время обязательно с таймзоной UTC, чтобы корректно сравнивать с +00:00
     current_time = datetime.now(timezone.utc)
@@ -174,8 +175,8 @@ def sync_maintain_sliding_window(file_path):
 
 async def main():
     exchange = ccxt.bybit({"enableRateLimit": True})
-    # csv_path = "../../multidim_market_data.csv"// todo
-    csv_path = "multidim_market_data.csv"
+    csv_path = "../../multidim_market_data.csv"
+    # csv_path = "multidim_market_data.csv"
     tasks = [
         asyncio.create_task(order_book_producer(exchange, "BTC/USDT")),
         asyncio.create_task(trades_producer(exchange, "BTC/USDT")),
