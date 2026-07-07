@@ -1,3 +1,4 @@
+import sys
 import joblib
 import lightgbm as lgb
 import numpy as np
@@ -9,34 +10,44 @@ from sklearn.metrics import log_loss, roc_auc_score
 
 warnings.filterwarnings('ignore', category=UserWarning)
 
-def prepare_sliced_dataset(config_path="config.ini"):
+def prepare_sliced_dataset(csv_file, config_path="config.ini"):
     """
     Выделенная функция загрузки данных.
-    Вырезает скользящее или фиксированное окно длиной N дней, начиная с даты d.
+    Читает переданный файл и вырезает скользящее или фиксированное окно длиной N дней.
     """
     config = configparser.ConfigParser()
     config.read(config_path)
 
-    csv_file = config.get("MARKET_DATA", "csv_file")
     start_date_str = config.get("MARKET_DATA", "start_date")
     slice_days = config.getint("MARKET_DATA", "slice_days")
 
-    print(f"辨 Загружаю датасет {csv_file}...")
-    df = pd.read_csv(csv_file)
-
-    # Приводим к datetime и гарантируем строгую хронологию
-    df["timestamp"] = pd.to_datetime(df["timestamp"])
-    df = df.sort_values("timestamp").reset_index(drop=True)
-
-    # 1. Точка старта d
-    start_boundary = pd.to_datetime(start_date_str)
-
-    # 2. Вычисляем точку окончания: start_date + N дней
+    # Жестко локализуем границы в UTC, чтобы они совпадали с тиками Bybit
+    start_boundary = pd.to_datetime(start_date_str).tz_localize("UTC")
     end_boundary = start_boundary + pd.Timedelta(days=slice_days)
+
+    print(f"Document loading dataset {csv_file}...")
+    try:
+        df = pd.read_csv(csv_file)
+    except FileNotFoundError:
+        print(f"❌ Ошибка: Файл {csv_file} не найден!")
+        sys.exit(1)
+
+    # Приводим к datetime. Если логгер пишет строки с таймзоной,
+    # pd.to_datetime автоматически сделает колонку tz-aware.
+    df["timestamp"] = pd.to_datetime(df["timestamp"])
+
+    # На всякий случай гарантируем, что вся колонка принудительно в UTC
+    if df["timestamp"].dt.tz is None:
+        df["timestamp"] = df["timestamp"].dt.tz_localize("UTC")
+    else:
+        df["timestamp"] = df["timestamp"].dt.tz_convert("UTC")
+
+    # Гарантируем строгую хронологию
+    df = df.sort_values("timestamp").reset_index(drop=True)
 
     print(f"⏳ Фильтрация окна: с {start_boundary} по {end_boundary} ({slice_days} дней)...")
 
-    # 3. Делаем временной срез данных
+    # 3. Делаем временной срез данных (теперь оба объекта строго в UTC)
     df_sliced = df[(df["timestamp"] >= start_boundary) & (df["timestamp"] <= end_boundary)].reset_index(drop=True)
 
     if df_sliced.empty or len(df_sliced) < 100:
@@ -44,22 +55,23 @@ def prepare_sliced_dataset(config_path="config.ini"):
         return None
 
     # Полезная статистика для контроля тиков в консоли
-    total_ticks = len(df_sliced)
-    print(f"✅ Срез сформирован. Получено строк: {total_ticks}")
+    total_len = len(df_sliced)
+    print(f"🎉 Новая качественная выборка нарезана!")
+    print(f"🎯 Итоговый размер датасета для ИИ (включая флэт-паттерны): {total_len}")
     print(f"📅 Фактические границы выборки: с {df_sliced['timestamp'].min()} по {df_sliced['timestamp'].max()}")
 
     return df_sliced
 
 
-def train_lgbm():
+def train_lgbm(data_file):
     config = configparser.ConfigParser()
     config.read("config.ini")
 
-    model_file_prod = config.get("MARKET_DATA", "model_file_prod")
-    model_file_test = config.get("MARKET_DATA", "model_file_test")
+    # Оставляем только один файл модели
+    model_file = config.get("MARKET_DATA", "model_file_prod", fallback="lgbm_market_model.pkl")
 
-    # Вызываем нашу новую изолированную функцию выборки данных
-    df = prepare_sliced_dataset()
+    # Вызываем изолированную функцию выборки данных с переданным файлом
+    df = prepare_sliced_dataset(data_file)
     if df is None:
         return
 
@@ -76,10 +88,6 @@ def train_lgbm():
 
     X = df[feature_cols].values
     y = df["label_next_price"].values + 1  # Сдвиг классов под LightGBM [0, 1, 2]
-
-    # Разделение на тренировочную выборку (80%) для кросс-валидации
-    train_size = int(len(X) * 0.8)
-    X_train_80, y_train_80 = X[:train_size], y[:train_size]
 
     tscv = TimeSeriesSplit(n_splits=5)
     print("🏋️‍♂️ Начинаю кросс-валидацию LightGBM на временных рядах...")
@@ -101,9 +109,10 @@ def train_lgbm():
     oof_auc = []
     best_iterations = []
 
-    for fold, (train_idx, test_idx) in enumerate(tscv.split(X_train_80)):
-        X_fold_train, X_fold_val = X_train_80[train_idx], X_train_80[test_idx]
-        y_fold_train, y_fold_val = y_train_80[train_idx], y_train_80[test_idx]
+    # Кросс-валидация идет по всей выборке без искусственного отсечения 80%
+    for fold, (train_idx, test_idx) in enumerate(tscv.split(X)):
+        X_fold_train, X_fold_val = X[train_idx], X[test_idx]
+        y_fold_train, y_fold_val = y[train_idx], y[test_idx]
 
         train_data = lgb.Dataset(X_fold_train, label=y_fold_train)
         valid_data = lgb.Dataset(X_fold_val, label=y_fold_val, reference=train_data)
@@ -136,17 +145,18 @@ def train_lgbm():
 
     optimal_trees = int(np.mean(best_iterations))
 
-    print(f"\n🛡️ Сборка модели для БЭКТЕСТЕРА (80% выборки)...")
-    backtest_dataset = lgb.Dataset(X_train_80, label=y_train_80)
-    backtest_model = lgb.train(params, backtest_dataset, num_boost_round=optimal_trees)
-    joblib.dump(backtest_model, model_file_test)
-    print(f"💾 Файл '{model_file_test}' успешно создан.")
-
-    print(f"\n🚀 Сборка финальной модели для ПРОДАКШЕНА (100% выборки)...")
+    print(f"\n🚀 Сборка единой боевой модели на 100% данных (Оптимальное кол-во деревьев: {optimal_trees})...")
     full_train_data = lgb.Dataset(X, label=y)
     final_model = lgb.train(params, full_train_data, num_boost_round=optimal_trees)
-    joblib.dump(final_model, model_file_prod)
-    print(f"💾 Файл '{model_file_prod}' успешно создан.")
+
+    joblib.dump(final_model, model_file)
+    print(f"💾 Модель '{model_file}' успешно создана и готова к деплою.")
 
 if __name__ == "__main__":
-    train_lgbm()
+    # Проверяем, передан ли аргумент с названием файла при запуске
+    if len(sys.argv) < 2:
+        print("❌ Ошибка запуска. Использование: python lgbm_train.py <путь_к_файлу_с_данными.csv>")
+        sys.exit(1)
+
+    target_csv = sys.argv[1]
+    train_lgbm(target_csv)

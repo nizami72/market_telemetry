@@ -1,14 +1,17 @@
-import numpy as np
-import pandas as pd
+import os
+import polars as pl
 import configparser
 # 🚨 ИМПОРТИРУЕМ НАШ НОВЫЙ МОДУЛЬ
 from market_regime import detect_and_save_market_regime
 
 
 def make_impulse_time_machine():
+    # Находим абсолютный путь к config.ini относительно текущего скрипта
+    current_dir = os.path.dirname(os.path.abspath(__file__))
+    config_path = os.path.join(current_dir, "config.ini")
 
     config = configparser.ConfigParser()
-    config.read("config.ini")
+    config.read(config_path, encoding="utf-8")
 
     # Базовый путь к сырым данным
     csv_file_row_data = config.get("LABELER", "csv_filerow_data")
@@ -18,7 +21,7 @@ def make_impulse_time_machine():
     # 🧠 Update config file
     # ==========================================
     detect_and_save_market_regime(24)
-    config.read("config.ini") # Перечитываем апдейты!
+    config.read(config_path, encoding="utf-8") # Перечитываем апдейты!
 
     # 🔧 Получаем динамические параметры
     noise_threshold = config.getfloat("LABELER", "noise_threshold")
@@ -27,102 +30,127 @@ def make_impulse_time_machine():
 
     print(f"📖 Читаем сырой файл {csv_file_row_data}...")
     try:
-        df = pd.read_csv(csv_file_row_data)
+        # В Polars чтение CSV происходит молниеносно
+        df = pl.read_csv(csv_file_row_data)
     except FileNotFoundError:
-        print("❌ Файл не найден.")
+        print(f"❌ Файл не найден по пути: {csv_file_row_data}")
         return
 
-    if len(df) < 50:
+    if df.height < 50:
         print("❌ Мало данных.")
         return
 
     # ==========================================
-    # 📡 МЯГКАЯ СИНХРОНИЗАЦИЯ СЕТКИ ВРЕМЕНИ
+    # 📡 МЯГКАЯ СИНХРОНИЗАЦИЯ СЕТКИ ВРЕМЕНИ (UTC)
     # ==========================================
-    print("⚙️ Выравниваю временную сетку без потери структуры...")
+    print("⚙️ Выравниваю временную сетку в жестком формате UTC...")
 
-    df["timestamp"] = pd.to_datetime(df["timestamp"])
-    df = df.sort_values("timestamp").reset_index(drop=True)
-
-    df["price"] = df["price"].ffill()
-
-    imb_cols = ["imbalance_5", "imbalance_20", "imbalance_50"]
-    df[imb_cols] = df[imb_cols].ffill()
-
-    df["trade_speed_10s"] = df["trade_speed_10s"].fillna(0.0)
-    df["market_delta_10s"] = df["market_delta_10s"].fillna(0.0)
-
+    # В Polars операции делаются через .with_columns() и выражения
+    df = (
+        df.with_columns(
+            # Жестко парсим строку в дату с таймзоной UTC
+            pl.col("timestamp").str.to_datetime(time_zone="UTC")
+        )
+        .sort("timestamp")
+        .with_columns([
+            pl.col("price").forward_fill(),
+            pl.col("imbalance_5").forward_fill(),
+            pl.col("imbalance_20").forward_fill(),
+            pl.col("imbalance_50").forward_fill(),
+            pl.col("trade_speed_10s").fill_null(0.0),
+            pl.col("market_delta_10s").fill_null(0.0),
+        ])
+    )
 
     # ==========================================
-    # 🧪 FEATURE ENGINEERING (КОНТЕКСТ)
+    # 🧪 FEATURE ENGINEERING (КОНТЕКСТ НА СКОРОСТИ RUST)
     # ==========================================
     print("⚙️ Генерирую расширенные фичи объемов и окон...")
 
-    rolling_speed_mean = df["trade_speed_10s"].rolling(window=30, min_periods=5).mean()
-    rolling_speed_std = df["trade_speed_10s"].rolling(window=30, min_periods=5).std()
+    # Скользящие окна в Polars пишутся через rolling_mean/rolling_std
+    df = df.with_columns([
+        pl.col("trade_speed_10s").rolling_mean(window_size=30, min_periods=5).alias("speed_mean"),
+        pl.col("trade_speed_10s").rolling_std(window_size=30, min_periods=5).alias("speed_std"),
+    ]).with_columns([
+        # Расчет z-score
+        ((pl.col("trade_speed_10s") - pl.col("speed_mean")) / pl.col("speed_std"))
+        .fill_nan(0.0)
+        .fill_null(0.0)
+        .alias("speed_zscore")
+    ])
 
-    df["speed_zscore"] = ((df["trade_speed_10s"] - rolling_speed_mean) / rolling_speed_std)
-    df["speed_zscore"] = df["speed_zscore"].replace([np.inf, -np.inf], np.nan).fillna(0.0)
+    # Основной пул фичей через мощный механизм выражений Polars (выполняется параллельно!)
+    df = df.with_columns([
+        pl.col("market_delta_10s").rolling_sum(12, min_periods=3).fill_null(0).alias("delta_rolling_2m"),
+        pl.col("market_delta_10s").rolling_sum(30, min_periods=5).fill_null(0).alias("delta_rolling_5m"),
+        (pl.col("imbalance_20") - pl.col("imbalance_20").shift(6)).fill_null(0).alias("imb_20_velocity"),
 
-    df["delta_rolling_2m"] = df["market_delta_10s"].rolling(window=12, min_periods=3).sum().fillna(0)
-    df["delta_rolling_5m"] = df["market_delta_10s"].rolling(window=30, min_periods=5).sum().fillna(0)
-    df["imb_20_velocity"] = df["imbalance_20"] - df["imbalance_20"].shift(6)
-
-    df["delta_rolling_30m"] = df["market_delta_10s"].rolling(window=180, min_periods=30).sum().fillna(0)
-    df["delta_rolling_1h"] = df["market_delta_10s"].rolling(window=360, min_periods=60).sum().fillna(0)
-    df["price_velocity_15m"] = df["price"] - df["price"].shift(90)
-    df["price_velocity_15m"] = df["price_velocity_15m"].fillna(0)
+        pl.col("market_delta_10s").rolling_sum(180, min_periods=30).fill_null(0).alias("delta_rolling_30m"),
+        pl.col("market_delta_10s").rolling_sum(360, min_periods=60).fill_null(0).alias("delta_rolling_1h"),
+        (pl.col("price") - pl.col("price").shift(90)).fill_null(0).alias("price_velocity_15m"),
+    ])
 
     # Высокочастотные фичи ускорения объемов
-    df["speed_ratio_1m"] = df["trade_speed_10s"] / (df["trade_speed_10s"].rolling(window=6, min_periods=1).mean() + 1e-5)
-    df["speed_ratio_5m"] = df["trade_speed_10s"] / (df["trade_speed_10s"].rolling(window=30, min_periods=1).mean() + 1e-5)
-    df["speed_ratio_15m"] = df["trade_speed_10s"] / (df["trade_speed_10s"].rolling(window=90, min_periods=1).mean() + 1e-5)
+    df = df.with_columns([
+        (pl.col("trade_speed_10s") / (pl.col("trade_speed_10s").rolling_mean(6, min_periods=1) + 1e-5)).alias("speed_ratio_1m"),
+        (pl.col("trade_speed_10s") / (pl.col("trade_speed_10s").rolling_mean(30, min_periods=1) + 1e-5)).alias("speed_ratio_5m"),
+        (pl.col("trade_speed_10s") / (pl.col("trade_speed_10s").rolling_mean(90, min_periods=1) + 1e-5)).alias("speed_ratio_15m"),
 
-    # Накопленная кумулятивная дельта
-    df["cum_delta_1m"] = df["market_delta_10s"].rolling(window=6, min_periods=1).sum().fillna(0)
-    df["cum_delta_5m"] = df["market_delta_10s"].rolling(window=30, min_periods=1).sum().fillna(0)
-    df["cum_delta_15m"] = df["market_delta_10s"].rolling(window=90, min_periods=1).sum().fillna(0)
+        pl.col("market_delta_10s").rolling_sum(6, min_periods=1).fill_null(0).alias("cum_delta_1m"),
+        pl.col("market_delta_10s").rolling_sum(30, min_periods=1).fill_null(0).alias("cum_delta_5m"),
+        pl.col("market_delta_10s").rolling_sum(90, min_periods=1).fill_null(0).alias("cum_delta_15m"),
 
-    # Скорости изменения тренда цены
-    df["price_change_5m"] = (df["price"] - df["price"].shift(30)).fillna(0)
-    df["price_change_1h"] = (df["price"] - df["price"].shift(360)).fillna(0)
+        (pl.col("price") - pl.col("price").shift(30)).fill_null(0).alias("price_change_5m"),
+        (pl.col("price") - pl.col("price").shift(360)).fill_null(0).alias("price_change_1h"),
+    ])
 
-    # Перенес филзна ниже, чтобы не забить нулями будущие сдвиги по приколу
-    df = df.fillna(0.0)
+    # Дропаем временные колонки средних, они больше не нужны
+    df = df.drop(["speed_mean", "speed_std"])
+
     # ==========================================
-
-
     # ⚡ ДИНАМИЧЕСКАЯ ИМПУЛЬСНАЯ РАЗМЕТКА
     # ==========================================
-    df["future_price"] = df["price"].shift(-look_ahead)
-    df["price_change"] = df["future_price"] - df["price"]
+    df = df.with_columns([
+        pl.col("price").shift(-look_ahead).alias("future_price")
+    ]).with_columns([
+        (pl.col("future_price") - pl.col("price")).alias("price_change")
+    ])
 
-    # Теперь noise_threshold объявлен и код не упадет
-    conditions = [
-        (df["price_change"] > noise_threshold),
-        (df["price_change"] < -noise_threshold),
-    ]
-    choices = [1, -1]
+    # Аналог np.select в Polars — это конструкция pl.when().then().otherwise()
+    df = df.with_columns(
+        pl.when(pl.col("price_change") > noise_threshold).then(1)
+        .when(pl.col("price_change") < -noise_threshold).then(-1)
+        .otherwise(0)
+        .alias("label_next_price")
+    )
 
-    df["label_next_price"] = np.select(conditions, choices, default=0)
+    # Запоминаем размер до очистки строк
+    len_before_drop = df.height
 
-    # Очищаем только реальные NaN от shift
-    df_cleaned = df.dropna(
-        subset=["future_price", "imb_20_velocity", "speed_zscore"]
-    ).copy()
+    # Очищаем строки с нуллами в ключевых колонках (после shift)
+    df_cleaned = df.drop_nulls(subset=["future_price", "imb_20_velocity", "speed_zscore"])
 
-    # Разрежение сетки по динамическому шагу thinning_step
-    df_filtered = df_cleaned.iloc[::thinning_step].reset_index(drop=True)
+    # 🎯 ФИКС: Убираем пустые строки, которые вылезли в самом начале файла
+    df_cleaned = df_cleaned.filter(pl.col("price").is_not_null() & pl.col("timestamp").is_not_null())
 
-    df_filtered = df_filtered.drop(columns=["future_price", "price_change"])
+    # Разрежение сетки (аналог iloc[::thinning_step]) через метод gather_every
+    df_filtered = df_cleaned.gather_every(thinning_step)
+
+    # Удаляем ненужные для ИИ колонки
+    df_filtered = df_filtered.drop(["future_price", "price_change"])
 
     ready_file = "../../data/multidim_labeled_market_data.csv"
-    df_filtered.to_csv(ready_file, index=False)
 
-    print(f"🎉 Новая импульсная разметка завершена, произведено разрежение сетки!")
-    print(f"🗑️ Было строк до фильтрации:                                        {len(df_cleaned)}")
-    print(f"🎯 Итоговый размер датасета для ИИ (включая флэт-паттерны):         {len(df_filtered)}")
-    print(f"📊 Баланс классов:\n{df_filtered['label_next_price'].value_counts().to_string()}")
+    # 🎯 Polars запишет дату строго в формате ISO 8601: 2026-05-30T17:19:19+00:00
+    df_filtered.write_csv(ready_file)
+
+    print(f"🎉 Новая импульсная разметка на Polars завершена!")
+    print(f"🗑️ Было строк до фильтрации:                                         {len_before_drop}")
+    print(f"🎯 Итоговый размер датасета для ИИ (включая флэт-паттерны):         {df_filtered.height}")
+
+    # Считаем баланс классов
+    class_counts = df_filtered["label_next_price"].value_counts()
+    print(f"📊 Баланс классов:\n{class_counts}")
 
 
 if __name__ == "__main__":
