@@ -1,44 +1,44 @@
 # How To
 
 ## Оглавление
-* [How to download all row csv data from Hetzner](#how-to-download-all-row-csv-data-from-hetzner)
-* [How to create big data fileset](#how-to-create-big-data-fileset)
-* [How to Train Model and Run Backtester](#how-to-train-model-and-run-backtester)
-* [How to Upload all Necessary Files on Hetzner](#how-to-upload-all-necessary-files-on-hetzner)
-* [How to Manage Paper Tariding Service](#how-to-manage-paper-tariding-service)
-* [How to Run any Python File](#how-to-run-any-python-file)
+* [Download all row csv data from Hetzner](#download-all-row-csv-data-from-hetzner)
+* [Create big data fileset](#create-big-data-fileset)
+* [Train Model and Run Backtester](#train-model-and-run-backtester)
+* [Upload all Necessary Files on Hetzner](#upload-all-necessary-files-on-hetzner)
+* [Manage Paper Tariding Service](#manage-paper-tariding-service)
+* [Run any Python File](#how-to-run-any-python-file)
 ___
 
 ## Local Work
 ___
 
-### How to download all row csv data from Hetzner
+### Download all row csv data from Hetzner
 
 Last file
 ```shell
-scp -i /home/nizami/.ssh/key2 root@157.180.16.28:/root/multidim_market_data.csv /home/nizami/projects/python/market_telemetry/data/hetzner
+scp -i ~/.ssh/key2 root@157.180.16.28:/root/multidim_market_data.csv ~/projects/python/market_telemetry/data/hetzner
 ```
 Archives
 ```shell
-scp -i /home/nizami/.ssh/key2 root@157.180.16.28:/root/multidim_market_data.csv.*.gz /home/nizami/projects/python/market_telemetry/data/hetzner
+scp -i ~/.ssh/key2 root@157.180.16.28:/root/multidim_market_data.csv.*.gz ~/projects/python/market_telemetry/data/hetzner
 ```
 
-### How to create big data fileset
+### Create big data fileset
 ```shell
-cd /home/nizami/projects/python/market_telemetry/src/market_telemetry &&
-source /home/nizami/projects/python/market_telemetry/.venv/bin/activate &&
+cd ~/projects/python/market_telemetry/src/market_telemetry &&
+source ~/projects/python/market_telemetry/.venv/bin/activate &&
 python prepare_big_data.py
 ```
 
-### How to Train Model and Run Backtester
+### Train Model and Run Backtester
 Go to the project folder
 ```shell
-cd /home/nizami/projects/python/market_telemetry/src/market_telemetry
+cd ~/projects/python/market_telemetry/src/market_telemetry
 ```
 
 activate envinronment
 ```shell
-source /home/nizami/projects/python/market_telemetry/.venv/bin/activate
+source ~/projects/python/market_telemetry/.venv/bin/activate
 ```
 
 And start scripts
@@ -51,53 +51,57 @@ Then visualize it
 python visualize_signals.py
 ```
 
-### How to download the csv file
+### Download the csv file
 ```shell
-scp -i /home/nizami/.ssh/key2 root@157.180.16.28:/root/multidim_market_data.csv /home/nizami/projects/python/market_telemetry/data/hetzner
+scp -i ~/.ssh/key2 root@157.180.16.28:/root/multidim_market_data.csv ~/projects/python/market_telemetry/data/hetzner
 ```
 
-### How to Upload all Necessary Files on Hetzner
+### Upload all Necessary Files on Hetzner
 
 
 Upload balance checker
 ```shell
-cd /home/nizami/projects/python/market_telemetry/src/market_telemetry/prod &&
-scp -i /home/nizami/.ssh/key2 balance_check.py root@157.180.16.28:/root/projects/market_telemetry
+cd ~/projects/python/market_telemetry/src/market_telemetry/prod &&
+scp -i ~/.ssh/key2 balance_check.py root@157.180.16.28:/root/projects/market_telemetry
 ```
 
 Upload live trader
 ```shell
-cd /home/nizami/projects/python/market_telemetry/src/market_telemetry/prod &&
-scp -i /home/nizami/.ssh/key2 bybit_live_trader.py root@157.180.16.28:/root/projects/market_telemetry
+cd ~/projects/python/market_telemetry/src/market_telemetry/prod &&
+scp -i ~/.ssh/key2 bybit_live_trader.py root@157.180.16.28:/root/projects/market_telemetry
 ```
 
 Upload paper trader
 ```shell
-cd /home/nizami/projects/python/market_telemetry/src/market_telemetry/prod && 
-scp -i /home/nizami/.ssh/key2 bybit_paper_trader.py root@157.180.16.28:/root/projects/market_telemetry
+cd ~/projects/python/market_telemetry/src/market_telemetry/prod && 
+scp -i ~/.ssh/key2 bybit_paper_trader.py root@157.180.16.28:/root/projects/market_telemetry
 ```
 
 Upload config IMPORTANT NOTE ALL CREDS WILL BE OVERRIDDEN BY MASK
 ```shell
-cd /home/nizami/projects/python/market_telemetry/src/market_telemetry/prod &&
-scp -i /home/nizami/.ssh/key2 config.ini root@157.180.16.28:/root/projects/market_telemetry
+cd ~/projects/python/market_telemetry/src/market_telemetry/prod &&
+scp -i ~/.ssh/key2 config.ini root@157.180.16.28:/root/projects/market_telemetry
 ```
-
 
 Upload regme
 ```shell
-cd /home/nizami/projects/python/market_telemetry/src/market_telemetry/prod &&
-scp -i /home/nizami/.ssh/key2 market_regime.py root@157.180.16.28:/root/projects/market_telemetry
+cd ~/projects/python/market_telemetry/src/market_telemetry/prod &&
+scp -i ~/.ssh/key2 market_regime.py root@157.180.16.28:/root/projects/market_telemetry
 ```
 
 Upload model
 ```shell
-cd /home/nizami/projects/python/market_telemetry/data &&
-scp -i /home/nizami/.ssh/key2 lgbm_live_model.pkl root@157.180.16.28:/root/projects/market_telemetry
+cd ~/projects/python/market_telemetry/data &&
+scp -i ~/.ssh/key2 lgbm_live_model.pkl root@157.180.16.28:/root/projects/market_telemetry
 ```
-___
 
-### How to Manage Paper Tariding Service
+Upload Logger
+```shell
+cd ~/projects/python/market_telemetry/src/market_telemetry/prod &&
+scp -i ~/.ssh/key2 multidim_logger.py root@157.180.16.28:/root/projects/market_telemetry
+```
+
+### Manage Paper Tariding Service
 
 
 Logs Paper Trader
@@ -135,11 +139,11 @@ Open Service file
 ```
 
 
-### How to Run any Python File in Prod
+### Run any Python File in Prod
 
 ```shell
-cd /home/nizami/projects/python/market_telemetry/src/market_telemetry/prod &&
-source /home/nizami/projects/python/market_telemetry/.venv/bin/activate &&
+cd ~/projects/python/market_telemetry/src/market_telemetry/prod &&
+source ~/projects/python/market_telemetry/.venv/bin/activate &&
 python any_file.py
 ````
 
@@ -151,7 +155,7 @@ python any_file.py
 
 Enter Hetzner
 ```
-ssh -i /home/nizami/.ssh/key2 root@157.180.16.28
+ssh -i ~/.ssh/key2 root@157.180.16.28
 ``` 
 
 Create log files on hetzner
@@ -161,5 +165,5 @@ sudo journalctl -u bybit-paper.service > alllogs.txt
 
 Download log file
 ```bash
-scp -i /home/nizami/.ssh/key2 root@157.180.16.28:/root/alllogs.txt /home/nizami/logs/
+scp -i ~/.ssh/key2 root@157.180.16.28:/root/alllogs.txt ~/logs/
 ```
