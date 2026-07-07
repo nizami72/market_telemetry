@@ -1,47 +1,70 @@
 """
-This script converts timestamps in a CSV file (specifically 'multidim_market_data.csv') 
+This script converts timestamps in a CSV file
 from a custom format (e.g., 'YYYY-MM-DD HH:MM:SS') to ISO 8601 format with a +00:00 offset,
 while also adjusting the time by subtracting 4 hours.
 """
 import os
+import sys
 from datetime import datetime, timedelta
 
-file_path = "multidim_market_data.csv"  # Укажите имя вашего файла
-temp_path = file_path + ".tmp"
+def convert_timestamps(file_path):
+    temp_path = file_path + ".tmp"
 
-with open(file_path, "r") as fin, open(temp_path, "w") as fout:
-    for line in fin:
-        if not line.strip():
-            fout.write(line)
-            continue
+    print(f"⚙️ Запуск конвертации таймстемпов для файла: {file_path}...")
 
-        parts = line.split(",", 1)
-        timestamp_str = parts[0]
+    try:
+        with open(file_path, "r") as fin, open(temp_path, "w") as fout:
+            for line in fin:
+                if not line.strip():
+                    fout.write(line)
+                    continue
 
-        try:
-            # Парсим старый формат. Если есть миллисекунды (например, 16:47:00,62727.25),
-            # отсекаем дробную часть после запятой для соответствия вашему целевому формату.
-            if "," in timestamp_str and len(timestamp_str) > 19:
-                base_time = timestamp_str.split(",")[0]
-            else:
-                base_time = timestamp_str
+                parts = line.split(",", 1)
+                timestamp_str = parts[0]
 
-            # Конвертируем в объект datetime
-            dt = datetime.strptime(base_time, "%Y-%m-%d %H:%M:%S")
+                try:
+                    # Парсим старый формат. Если есть миллисекунды, отсекаем их.
+                    if "," in timestamp_str and len(timestamp_str) > 19:
+                        base_time = timestamp_str.split(",")[0]
+                    else:
+                        base_time = timestamp_str
 
-            # Вычитаем 4 часа
-            dt = dt - timedelta(hours=4)
+                    # Конвертируем в объект datetime
+                    dt = datetime.strptime(base_time, "%Y-%m-%d %H:%M:%S")
 
-            # Формируем новый таймштамп в формате ISO 8601 с зоной +00:00
-            new_timestamp = dt.strftime("%Y-%m-%dT%H:%M:%S+00:00")
+                    # Вычитаем 4 часа
+                    dt = dt - timedelta(hours=4)
 
-            # Собираем строку обратно
-            fout.write(new_timestamp + "," + parts[1])
+                    # Формируем новый таймштамп в формате ISO 8601 с зоной +00:00
+                    new_timestamp = dt.strftime("%Y-%m-%dT%H:%M:%S+00:00")
 
-        except ValueError:
-            # Если строка не подошла под формат даты (например, заголовок), оставляем как есть
-            fout.write(line)
+                    # Собираем строку обратно
+                    fout.write(new_timestamp + "," + parts[1])
 
-# Атомарная замена файла в операционной системе
-os.replace(temp_path, file_path)
-print("Конвертация 55 000 строк успешно завершена!")
+                except ValueError:
+                    # Если строка не подошла под формат даты (например, заголовок), оставляем как есть
+                    fout.write(line)
+
+        # Атомарная замена файла в операционной системе
+        os.replace(temp_path, file_path)
+        print("✅ Конвертация успешно завершена!")
+
+    except FileNotFoundError:
+        print(f"❌ Ошибка: Файл '{file_path}' не найден!")
+        sys.exit(1)
+    except Exception as e:
+        print(f"❌ Критическая ошибка при обработке: {e}")
+        # Убираем временный файл, если скрипт упал
+        if os.path.exists(temp_path):
+            os.remove(temp_path)
+        sys.exit(1)
+
+if __name__ == "__main__":
+    # Проверяем, передан ли аргумент с названием файла при запуске
+    if len(sys.argv) < 2:
+        print("❌ Ошибка запуска.")
+        print("💡 Использование: python convert_time.py <путь_к_файлу.csv>")
+        sys.exit(1)
+
+    target_csv = sys.argv[1]
+    convert_timestamps(target_csv)

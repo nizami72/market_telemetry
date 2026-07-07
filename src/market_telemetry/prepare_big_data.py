@@ -5,7 +5,7 @@ import pandas as pd
 
 def compile_massive_dataset(output_path="../../data/multidim_market_data.csv"):
     # Путь к папке, где лежат активный CSV и .gz архивы от logrotate
-    data_dir = "../../data/hetzner/"
+    data_dir = "../../data/csv/"
 
     print("📦 Начинаю сборку монолитного датасета из архивов Linux...")
     all_chunks = []

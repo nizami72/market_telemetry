@@ -15,5 +15,6 @@
 /data/lgbm_backtest_model.pkl
 /data/lgbm_live_model.pkl
 /src/market_telemetry/prod/paper_trading.log
-/data/hetzner/multidim_market_data.csv
-/data/hetzner/multidim_market_data.csv.1.gz
+/data/csv/multidim_market_data.csv
+/data/csv/multidim_market_data.csv.1.gz
+/src/market_telemetry/prod/multidim_market_data.csv
