@@ -14,7 +14,9 @@ class MarketState:
         self.lock = asyncio.Lock()
         self.seen = set()
 
+
 state = MarketState()
+
 
 async def order_book_producer(exchange, symbol):
     while True:
@@ -25,6 +27,7 @@ async def order_book_producer(exchange, symbol):
         except Exception:
             traceback.print_exc()
             await asyncio.sleep(2)
+
 
 async def trades_producer(exchange, symbol):
     while True:
@@ -66,12 +69,14 @@ async def trades_producer(exchange, symbol):
             traceback.print_exc()
             await asyncio.sleep(2)
 
+
 def imbalance(ob, depth):
     bids = ob["bids"][:depth]
     asks = ob["asks"][:depth]
     bv = sum(p * v for p, v in bids)  # Математика взвешивания по цене (USDT объем)
     av = sum(p * v for p, v in asks)
     return round(bv / (bv + av), 4) if (bv + av) else 0.5
+
 
 async def logger_consumer(csv_file):
 
@@ -117,60 +122,63 @@ async def logger_consumer(csv_file):
             last_clean_time = time.time()
 
 
-
 # Вынесли тяжелую очистку файла в отдельную синхронную функцию
 def sync_maintain_sliding_window(file_path):
-    # Задаем окно как интервал timedelta
     WINDOW_SECONDS = timedelta(days=32, seconds=10)
-    # WINDOW_SECONDS = timedelta(seconds=100)
-
-    # Текущее время обязательно с таймзоной UTC, чтобы корректно сравнивать с +00:00
     current_time = datetime.now(timezone.utc)
+    cutoff_time = current_time - WINDOW_SECONDS
 
-    if os.path.exists(file_path):
-        try:
-            with open(file_path, 'r', encoding='utf-8') as f:
-                lines = f.readlines()
+    if not os.path.exists(file_path):
+        return
 
-            valid_lines = []
-            # Сохраняем заголовок CSV, если он есть
-            if lines and "timestamp" in lines[0]:
-                valid_lines.append(lines[0])
-                start_idx = 1
-            else:
-                start_idx = 0
+    try:
+        with open(file_path, 'r', encoding='utf-8') as f:
+            lines = f.readlines()
 
-            for line in lines[start_idx:]:
-                if not line.strip():  # Пропускаем пустые строки, если они есть
-                    continue
+        if not lines:
+            return
 
-                try:
-                    # 1. Вытягиваем строчку с датой
-                    raw_timestamp_str = line.split(',')[0].strip()
+        has_header = "timestamp" in lines[0]
+        header = lines[0] if has_header else None
+        start_idx = 1 if has_header else 0
 
-                    # 2. Парсим ISO формат в объект datetime (он автоматически сохранит таймзону)
-                    log_timestamp = datetime.fromisoformat(raw_timestamp_str)
+        # Ищем индекс первой строки, которая ЗАХОДИТ в скользящее окно
+        slice_idx = None
+        for i in range(start_idx, len(lines)):
+            line = lines[i]
+            if not line.strip():
+                continue
+            try:
+                raw_timestamp_str = line.split(',')[0].strip()
+                # Если парсинг упадет, управление уйдет в except
+                log_timestamp = datetime.fromisoformat(raw_timestamp_str)
 
-                    # 3. Разница двух timezone-aware datetime объектов дает timedelta
-                    if (current_time - log_timestamp) <= WINDOW_SECONDS:
-                        valid_lines.append(line)
+                # Как только нашли строку из будущего/актуального окна:
+                if log_timestamp >= cutoff_time:
+                    slice_idx = i
+                    break
+            except Exception:
+                # Если строка битая, пропускаем её в поиске точки отсечения
+                continue
 
-                except Exception as e:
-                    print(f"Error processing line: {e}")  # Полезно для отладки
-                    # Если строка повреждена, но её не хочется терять — оставляем
-                    valid_lines.append(line)
+        # Формируем новый массив строк
+        if slice_idx is not None:
+            # Берем всё начиная с slice_idx до самого конца файла
+            valid_lines = lines[slice_idx:]
+            if header:
+                valid_lines.insert(0, header)
+        else:
+            # Если ни одна строка не подошла под условия окна, оставляем только заголовок
+            valid_lines = [header] if header else []
 
+        # Перезаписываем файл ТОЛЬКО если реально что-то удалили
+        if len(valid_lines) < len(lines):
             with open(file_path, 'w', encoding='utf-8') as f:
                 f.writelines(valid_lines)
+            print(f"[{datetime.now().strftime('%H:%M:%S')}] Очищено строк: {len(lines) - len(valid_lines)}")
 
-            # Лог выполнения (для локального времени вывода в консоль используем старый вариант)
-            print(f"[{datetime.now().strftime('%H:%M:%S')}] Очистка файла выполнена. Окно удержано.")
-        except Exception:
-            traceback.print_exc()
-
-
-
-
+    except Exception as e:
+        print(f"Error: {e}")
 
 
 async def main():
