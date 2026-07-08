@@ -23,7 +23,7 @@ def generate_mirror_snapshots():
         df_market = pd.read_csv(market_data_file)
         df_trades = pd.read_csv(trades_log_file)
     except FileNotFoundError as e:
-        print(f"❌ Ошибка: Не найдены файлы отчетов. Сначала запусти lgbm_backtester.py! {e}")
+        print(f"❌ Ошибка: Не найдены файлы отчетов. Сначала запусти tester.py! {e}")
         return
 
     if df_trades.empty:

@@ -12,10 +12,10 @@
 /data/trades_log.csv
 /data/trading_execution_logs.csv
 /data/multidim_market_data.csv
-/data/lgbm_backtest_model.pkl
-/data/lgbm_live_model.pkl
+*.pkl
 /src/market_telemetry/prod/paper_trading.log
 /data/csv/multidim_market_data.csv
 /data/csv/multidim_market_data.csv.1.gz
 /src/market_telemetry/prod/multidim_market_data.csv
 /data/csv_labeled/labeled_data_2026-06.csv
+/data/csv/*_labeled.csv

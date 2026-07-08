@@ -64,7 +64,7 @@ python src/market_telemetry/lgbm_train.py
 Запускает симулятор торговли на тестовом куске истории, проверяя реальное математическое ожидание модели с использованием жестких ордеров `Take Profit` и `Stop Loss`.
 
 ```bash
-python src/market_telemetry/lgbm_backtester.py
+python src/market_telemetry/tester.py
 
 ```
 

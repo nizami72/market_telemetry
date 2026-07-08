@@ -7,13 +7,14 @@ import warnings
 import configparser
 from sklearn.model_selection import TimeSeriesSplit
 from sklearn.metrics import log_loss, roc_auc_score
+from telegram_alerts import send_telegram_alert_sync
 
 warnings.filterwarnings('ignore', category=UserWarning)
 
 def prepare_sliced_dataset(csv_file, config_path="config.ini"):
     """
-    Выделенная функция загрузки данных.
-    Читает переданный файл и вырезает скользящее или фиксированное окно длиной N дней.
+    Улучшенная функция загрузки данных.
+    Если start_date == 'auto', рассчитывает плавающее окно за последние slice_days.
     """
     config = configparser.ConfigParser()
     config.read(config_path)
@@ -21,9 +22,17 @@ def prepare_sliced_dataset(csv_file, config_path="config.ini"):
     start_date_str = config.get("MARKET_DATA", "start_date")
     slice_days = config.getint("MARKET_DATA", "slice_days")
 
-    # Жестко локализуем границы в UTC, чтобы они совпадали с тиками Bybit
-    start_boundary = pd.to_datetime(start_date_str).tz_localize("UTC")
-    end_boundary = start_boundary + pd.Timedelta(days=slice_days)
+    # 🤖 АВТОМАТИЗАЦИЯ ДЛЯ НОЧНОГО ЗАПУСКА
+    if start_date_str.lower() == "auto":
+        # Берем текущее время сервера в UTC и отнимаем slice_days
+        now_utc = pd.Timestamp.now(tz="UTC")
+        start_boundary = (now_utc - pd.Timedelta(days=slice_days)).floor("D")
+        end_boundary = now_utc
+        print(f"🔄 [AUTO DATE] Обнаружен ночной режим. Авто-расчет окна за последние {slice_days} дней.")
+    else:
+        # Если в конфиге жесткая дата (например для R&D исследований за июнь)
+        start_boundary = pd.to_datetime(start_date_str).tz_localize("UTC")
+        end_boundary = start_boundary + pd.Timedelta(days=slice_days)
 
     print(f"Document loading dataset {csv_file}...")
     try:
@@ -32,33 +41,26 @@ def prepare_sliced_dataset(csv_file, config_path="config.ini"):
         print(f"❌ Ошибка: Файл {csv_file} не найден!")
         sys.exit(1)
 
-    # Приводим к datetime. Если логгер пишет строки с таймзоной,
-    # pd.to_datetime автоматически сделает колонку tz-aware.
     df["timestamp"] = pd.to_datetime(df["timestamp"])
 
-    # На всякий случай гарантируем, что вся колонка принудительно в UTC
     if df["timestamp"].dt.tz is None:
         df["timestamp"] = df["timestamp"].dt.tz_localize("UTC")
     else:
         df["timestamp"] = df["timestamp"].dt.tz_convert("UTC")
 
-    # Гарантируем строгую хронологию
     df = df.sort_values("timestamp").reset_index(drop=True)
 
-    print(f"⏳ Фильтрация окна: с {start_boundary} по {end_boundary} ({slice_days} дней)...")
+    print(f"⏳ Фильтрация скользящего окна: с {start_boundary} по {end_boundary}...")
 
-    # 3. Делаем временной срез данных (теперь оба объекта строго в UTC)
+    # Делаем временной срез данных
     df_sliced = df[(df["timestamp"] >= start_boundary) & (df["timestamp"] <= end_boundary)].reset_index(drop=True)
 
     if df_sliced.empty or len(df_sliced) < 100:
-        print(f"❌ Критическая ошибка: в интервале дней найдено всего {len(df_sliced)} строк! Проверь даты.")
+        print(f"❌ Критическая ошибка: в интервале найдено всего {len(df_sliced)} строк! Проверь базу.")
         return None
 
-    # Полезная статистика для контроля тиков в консоли
-    total_len = len(df_sliced)
-    print(f"🎉 Новая качественная выборка нарезана!")
-    print(f"🎯 Итоговый размер датасета для ИИ (включая флэт-паттерны): {total_len}")
-    print(f"📅 Фактические границы выборки: с {df_sliced['timestamp'].min()} по {df_sliced['timestamp'].max()}")
+    print(f"🎉 Новая качественная выборка нарезана! Размер: {len(df_sliced)} строк.")
+    print(f"📅 Границы выборки: с {df_sliced['timestamp'].min()} по {df_sliced['timestamp'].max()}")
 
     return df_sliced
 
@@ -150,6 +152,27 @@ def train_lgbm(data_file):
     final_model = lgb.train(params, full_train_data, num_boost_round=optimal_trees)
 
     joblib.dump(final_model, model_file)
+    # Notify vis Telegram
+    mean_auc = np.nanmean(oof_auc)
+    mean_logloss = np.mean(oof_logloss)
+    min_date = df['timestamp'].min().strftime('%Y-%m-%d %H:%M')
+    max_date = df['timestamp'].max().strftime('%Y-%m-%d %H:%M')
+
+    # Чистый MarkdownV2 с моноширинным блоком данных
+    alert_text = (
+        "🤖 *MLOps Pipeline: Модель успешно обновлена\\!*\n\n"
+        "\n"
+        f"Период:    c {min_date} по {max_date} UTC\n"
+        f"Выборка:   {len(df):,} строк\n"
+        f"Ансамбль:  {optimal_trees} деревьев\n\n"
+        "Метрики кросс-валидации (5-Fold TSCV):\n"
+        f"• Mean ROC-AUC:  {mean_auc:.4f}\n"
+        f"• Mean LogLoss:  {mean_logloss:.4f}\n\n"
+        "Статус:    Файл .pkl перезаписан на VPS.\n"
+        "\n"
+        "⚙️ `paper_trader.py` переключился на новые веса\\."
+    )
+    send_telegram_alert_sync(alert_text)
     print(f"💾 Модель '{model_file}' успешно создана и готова к деплою.")
 
 if __name__ == "__main__":

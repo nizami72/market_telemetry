@@ -1,21 +1,20 @@
+import sys
 import joblib
 import numpy as np
 import pandas as pd
 import configparser
+import os
 
-def run_lgbm_fixed_backtester():
+def run_lgbm_fixed_backtester(csv_file):
     config = configparser.ConfigParser()
     config.read("config.ini")
 
-    csv_file = config.get("MARKET_DATA", "csv_file")
-    model_file = config.get("MARKET_DATA", "model_file_test")
+    model_file = config.get("MARKET_DATA", "model_file")
 
     print(f"📖 Загружаю датасет {csv_file}...")
     try:
         df_test = pd.read_csv(csv_file)
-        test_size = int(len(df_test) * 0.2)
-        df_test = df_test.iloc[-test_size:].reset_index(drop=True)
-        print(f"🛡️ Активирован режим Out-of-Sample. Для симуляции взято {len(df_test)} чистых строк.")
+        print(f"🛡️ Режим полного тестирования. Для симуляции взят весь файл: {len(df_test)} строк.")
     except FileNotFoundError as e:
         print(f"❌ Ошибка загрузки файлов: {e}")
         return
@@ -52,7 +51,7 @@ def run_lgbm_fixed_backtester():
     df_test["proba_flat"] = preds_proba[:, 1]
     df_test["proba_up"]   = preds_proba[:, 2]
 
-    # ГЕНЕРИРУЕМ СИГНАЛЫ (Один раз, без дублирования)
+    # ГЕНЕРИРУЕМ СИГНАЛЫ
     conditions = [
         df_test["proba_up"] > threshold,
         df_test["proba_down"] > threshold
@@ -187,7 +186,6 @@ def run_lgbm_fixed_backtester():
     print("=" * 50)
 
     if trade_logs:
-        executed_trades = []
         current_trade = None
         for log in trade_logs:
             if "OPEN" in log["action"]:
@@ -204,8 +202,8 @@ def run_lgbm_fixed_backtester():
                 current_trade["result"] = "PROFIT" if "TAKE_PROFIT" in log["action"] or log["pnl"] > 0 else "LOSS"
                 executed_trades.append(current_trade)
                 current_trade = None
+
     if executed_trades:
-        import os
         output_dir = "../../data"
         os.makedirs(output_dir, exist_ok=True)
         log_path = os.path.join(output_dir, "trades_log.csv")
@@ -213,4 +211,9 @@ def run_lgbm_fixed_backtester():
         print(f"💾 Лог сделок успешно сохранен в {log_path} для отрисовки графиков.")
 
 if __name__ == "__main__":
-    run_lgbm_fixed_backtester()
+    if len(sys.argv) < 2:
+        print("❌ Ошибка запуска. Использование: python tester.py <путь_к_файлу_для_теста.csv>")
+        sys.exit(1)
+
+    target_csv = sys.argv[1]
+    run_lgbm_fixed_backtester(target_csv)

@@ -43,7 +43,7 @@ source ~/projects/python/market_telemetry/.venv/bin/activate
 
 And start scripts
 ```shell
-python labeler.py && python lgbm_train.py && python lgbm_backtester.py
+python labeler.py && python lgbm_train.py && python tester.py
 ```
 
 Then visualize it
@@ -99,6 +99,24 @@ Upload Logger
 ```shell
 cd ~/projects/python/market_telemetry/src/market_telemetry/prod &&
 scp -i ~/.ssh/key2 multidim_logger.py root@157.180.16.28:/root/projects/market_telemetry
+```
+
+Upload labeler
+```shell
+cd ~/projects/python/market_telemetry/src/market_telemetry/prod &&
+scp -i ~/.ssh/key2 labeler.py root@157.180.16.28:/root/projects/market_telemetry
+```
+
+Upload Trainer
+```shell
+cd ~/projects/python/market_telemetry/src/market_telemetry/prod &&
+scp -i ~/.ssh/key2 lgbm_train.py root@157.180.16.28:/root/projects/market_telemetry
+```
+
+Upload pipeline shell
+```shell
+cd ~/projects/python/market_telemetry/src/market_telemetry/prod &&
+scp -i ~/.ssh/key2 run_nightly_pipeline.sh root@157.180.16.28:/root/projects/market_telemetry
 ```
 
 ### Manage Paper Tariding Service
