@@ -15,6 +15,7 @@ def make_impulse_time_machine():
 
     # Базовый путь к сырым данным
     csv_file_row_data = config.get("LABELER", "csv_filerow_data")
+    csv_file_labeled_data = config.get("LABELER", "csv_file_labeled_data")
     look_ahead = config.getint("LABELER", "look_ahead")
 
     # ==========================================
@@ -139,10 +140,8 @@ def make_impulse_time_machine():
     # Удаляем ненужные для ИИ колонки
     df_filtered = df_filtered.drop(["future_price", "price_change"])
 
-    ready_file = "../../data/multidim_labeled_market_data.csv"
-
     # 🎯 Polars запишет дату строго в формате ISO 8601: 2026-05-30T17:19:19+00:00
-    df_filtered.write_csv(ready_file)
+    df_filtered.write_csv(csv_file_labeled_data)
 
     print(f"🎉 Новая импульсная разметка на Polars завершена!")
     print(f"🗑️ Было строк до фильтрации:                                         {len_before_drop}")

@@ -43,7 +43,7 @@ source ~/projects/python/market_telemetry/.venv/bin/activate
 
 And start scripts
 ```shell
-python multidim_labeler.py && python lgbm_train.py && python lgbm_backtester.py
+python labeler.py && python lgbm_train.py && python lgbm_backtester.py
 ```
 
 Then visualize it
