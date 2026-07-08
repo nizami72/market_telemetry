@@ -76,10 +76,12 @@ def detect_and_save_market_regime(window_hours=24):
 
         # ДВУХУРОВНЕВАЯ АВТО-МАТЕМАТИКА РЕЖИМОВ:
         if avg_candle_range > 150.0:
+            tp_sl_size = 300.0
             thinning_step = 90      # Сильное разрежение под макро-тренды
             threshold = 0.42        # Повышаем планку уверенности для ИИ в Шторм
             regime_name = "ШТОРМ (ВЫСОКАЯ ВОЛАТИЛЬНОСТЬ)"
         else:
+            tp_sl_size = 300.0
             thinning_step = 45      # Плотный сбор под микро-паттерны
             threshold = 0.39        # Исправил опечатку: возвращаем флэтовый порог 0.39 из твоей архитектуры
             regime_name = "ШТИЛЬ (НИЗКАЯ ВОЛАТИЛЬНОСТЬ)"
@@ -95,7 +97,7 @@ def detect_and_save_market_regime(window_hours=24):
         config.set("LABELER", "data_thinning_step", str(thinning_step))
 
         config.set("BACKTESTER", "confidence_threshold", str(threshold))
-        config.set("BACKTESTER", "tp_sl_size", str(noise_threshold))
+        config.set("BACKTESTER", "tp_sl_size", str(tp_sl_size))
         config.set("BACKTESTER", "market_regime", regime_name)
 
         # Физически сохраняем изменения на диск
