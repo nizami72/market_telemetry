@@ -1,21 +1,17 @@
 import os
+import sys
 import polars as pl
 import configparser
-# 🚨 ИМПОРТИРУЕМ НАШ НОВЫЙ МОДУЛЬ
 from market_regime import detect_and_save_market_regime
 
 
-def make_impulse_time_machine():
-    # Находим абсолютный путь к config.ini относительно текущего скрипта
+def make_impulse_time_machine(csv_file_row_data):
     current_dir = os.path.dirname(os.path.abspath(__file__))
     config_path = os.path.join(current_dir, "config.ini")
 
     config = configparser.ConfigParser()
     config.read(config_path, encoding="utf-8")
 
-    # Базовый путь к сырым данным
-    csv_file_row_data = config.get("LABELER", "csv_filerow_data")
-    csv_file_labeled_data = config.get("LABELER", "csv_file_labeled_data")
     look_ahead = config.getint("LABELER", "look_ahead")
 
     # ==========================================
@@ -28,6 +24,10 @@ def make_impulse_time_machine():
     noise_threshold = config.getfloat("LABELER", "noise_threshold")
     thinning_step = config.getint("LABELER", "data_thinning_step")
     # ==========================================
+
+    # Динамически формируем имя итогового файла с постфиксом _test
+    base_name, _ = os.path.splitext(csv_file_row_data)
+    csv_file_labeled_data = f"{base_name}_labeled.csv"
 
     print(f"📖 Читаем сырой файл {csv_file_row_data}...")
     try:
@@ -140,10 +140,11 @@ def make_impulse_time_machine():
     # Удаляем ненужные для ИИ колонки
     df_filtered = df_filtered.drop(["future_price", "price_change"])
 
-    # 🎯 Polars запишет дату строго в формате ISO 8601: 2026-05-30T17:19:19+00:00
+    # Сохраняем итоговый файл (название сформировано с постфиксом _test)
     df_filtered.write_csv(csv_file_labeled_data)
 
     print(f"🎉 Новая импульсная разметка на Polars завершена!")
+    print(f"💾 Файл успешно сохранен по пути: {csv_file_labeled_data}")
     print(f"🗑️ Было строк до фильтрации:                                         {len_before_drop}")
     print(f"🎯 Итоговый размер датасета для ИИ (включая флэт-паттерны):         {df_filtered.height}")
 
@@ -153,4 +154,10 @@ def make_impulse_time_machine():
 
 
 if __name__ == "__main__":
-    make_impulse_time_machine()
+    # Проверяем, передан ли аргумент с названием файла при запуске
+    if len(sys.argv) < 2:
+        print("❌ Ошибка запуска. Использование: python multidim_labeler.py <путь_к_сырому_файлу.csv>")
+        sys.exit(1)
+
+    target_csv = sys.argv[1]
+    make_impulse_time_machine(target_csv)
