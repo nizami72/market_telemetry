@@ -17,6 +17,7 @@ User=root
 WorkingDirectory=/root/projects/market_telemetry/
 ExecStart=/root/projects/market_telemetry/venv/bin/python3 -u bybit_paper_trader.py
 Restart=always
+RestartSec=5
 StandardOutput=append:/var/log/bybit/bybit-paper-traider.log
 StandardError=journalartSec=5
 
