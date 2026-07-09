@@ -40,3 +40,39 @@ scp -i /home/nizami/.ssh/key2 multidim_logger.py root@157.180.16.28:/root/projec
 sed -i 's/\r//g' multidim_market_data_new.csv
 ```
 Эта команда мгновенно удалит все возвраты каретки из файла, сделав его формат чисто линуксовым.
+
+Как скачть лог логгера
+```
+ssh -i ~/.ssh/key2 root@157.180.16.28
+```
+
+```
+sudo journalctl -u telemetry-logger.service > logger.log
+```
+
+```
+scp -i ~/.ssh/key2 root@157.180.16.28:/root/logger.log ~/Desktop/
+```
+
+### Logger Service File
+
+/etc/systemd/system/telemetry-logger.service
+
+```
+[Unit]
+Description=Market Telemetry Big Data Logger
+After=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/root/projects/market_telemetry
+ExecStart=/root/projects/market_telemetry/venv/bin/python multidim_logger.py
+Restart=always
+RestartSec=5
+StandardOutput=append:/var/log/telemetry-logger.log
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
+```

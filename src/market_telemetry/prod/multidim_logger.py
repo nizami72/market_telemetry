@@ -112,7 +112,6 @@ async def logger_consumer(csv_file):
             round(buy - sell, 4), count, ""
         ]
 
-        print(row)
         with open(csv_file, 'a', encoding='utf-8') as f:
             f.write(','.join(map(str, row)) + '\n')
 
