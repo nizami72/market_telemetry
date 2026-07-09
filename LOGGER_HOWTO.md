@@ -76,3 +76,20 @@ StandardError=journal
 [Install]
 WantedBy=multi-user.target
 ```
+
+### SETUP Logger Logrotate File, Not implemented yet
+```
+sudo vim /etc/logrotate.d/telemetry-logger
+```
+
+```
+/var/log/telemetry-logger.log {
+daily               # Ротация каждый день
+rotate 7            # Хранить логи только за последние 7 дней (остальное удалять)
+compress            # Сжимать старые логи в .gz (экономит 90% места)
+delaycompress       # Не сжимать самый свежий вчерашний лог
+missingok           # Не выдавать ошибку, если файла нет
+notifempty          # Не делать ротацию, если файл пустой
+copytruncate        # Отрезать лог «на лету», не останавливая Python-скрипт
+}
+```
