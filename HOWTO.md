@@ -16,7 +16,7 @@ ___
 
 Last file
 ```shell
-scp -i ~/.ssh/key2 root@157.180.16.28:/root/multidim_market_data.csv ~/projects/python/market_telemetry/data/hetzner
+scp -i ~/.ssh/key2 root@157.180.16.28:/root/multidim_market_data.csv ~/projects/python/market_telemetry/data/csv
 ```
 Archives
 ```shell
@@ -184,6 +184,12 @@ sudo journalctl -u bybit-paper.service > alllogs.txt
 Download the log file
 ```bash
 scp -i ~/.ssh/key2 root@157.180.16.28:/root/alllogs.txt ~/logs/
+```
+
+
+Download labeled log file
+```bash
+scp -i ~/.ssh/key2 root@157.180.16.28:/root/multidim_market_labeled.csv ~/projects/python/market_telemetry/data/csv
 ```
 
 
