@@ -204,7 +204,7 @@ def run_lgbm_fixed_backtester(csv_file):
                 current_trade = None
 
     if executed_trades:
-        output_dir = "../../data"
+        output_dir = "../../../data"
         os.makedirs(output_dir, exist_ok=True)
         log_path = os.path.join(output_dir, "trades_log.csv")
         pd.DataFrame(executed_trades).to_csv(log_path, index=False)
