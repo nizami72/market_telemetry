@@ -1,185 +1,150 @@
+import os
 import sys
 import joblib
-import lightgbm as lgb
+import warnings
 import numpy as np
 import pandas as pd
-import warnings
-import configparser
+import lightgbm as lgb
 from sklearn.model_selection import TimeSeriesSplit
 from sklearn.metrics import log_loss, roc_auc_score
-from telegram_alerts import send_telegram_alert_sync
 
+# Отключаем спам-предупреждения LightGBM для чистых логов cron
 warnings.filterwarnings('ignore', category=UserWarning)
 
-def prepare_sliced_dataset(csv_file, config_path="config.ini"):
-    """
-    Улучшенная функция загрузки данных.
-    Если start_date == 'auto', рассчитывает плавающее окно за последние slice_days.
-    """
-    config = configparser.ConfigParser()
-    config.read(config_path)
+# Конфигурация каскада агентов (Фрактальная матрица целей и шагов)
+AGENTS_CONFIG = {
+    "M15": {"horizon_rows": 90,   "target_usdt": 250.0, "thinning_step": 30},
+    "M30": {"horizon_rows": 180,  "target_usdt": 450.0, "thinning_step": 60},
+    "M45": {"horizon_rows": 270,  "target_usdt": 600.0, "thinning_step": 90},
+    "M60": {"horizon_rows": 360,  "target_usdt": 800.0, "thinning_step": 120}
+}
 
-    start_date_str = config.get("MARKET_DATA", "start_date")
-    slice_days = config.getint("MARKET_DATA", "slice_days")
+FEATURE_COLS = [
+    "imbalance_5", "imbalance_20", "imbalance_50",
+    "market_delta_10s", "trade_speed_10s", "speed_zscore",
+    "delta_rolling_2m", "delta_rolling_5m", "imb_20_velocity",
+    "delta_rolling_30m", "delta_rolling_1h", "price_velocity_15m"
+]
 
-    # 🤖 АВТОМАТИЗАЦИЯ ДЛЯ НОЧНОГО ЗАПУСКА
-    if start_date_str.lower() == "auto":
-        # Берем текущее время сервера в UTC и отнимаем slice_days
-        now_utc = pd.Timestamp.now(tz="UTC")
-        start_boundary = (now_utc - pd.Timedelta(days=slice_days)).floor("D")
-        end_boundary = now_utc
-        print(f"🔄 [AUTO DATE] Обнаружен ночной режим. Авто-расчет окна за последние {slice_days} дней.")
-    else:
-        # Если в конфиге жесткая дата (например для R&D исследований за июнь)
-        start_boundary = pd.to_datetime(start_date_str).tz_localize("UTC")
-        end_boundary = start_boundary + pd.Timedelta(days=slice_days)
+def train_cascade_ensemble(feature_store_path):
+    # feature_store_path = "../../data/multidim_market_features.csv"
+    models_dir = "models"
 
-    print(f"Document loading dataset {csv_file}...")
+    if not os.path.exists(models_dir):
+        os.makedirs(models_dir)
+
+    print(f"📖 Загружаю плотный Feature Store: {feature_store_path}...")
     try:
-        df = pd.read_csv(csv_file)
+        # Плотный датасет (270 000+ строк), упорядоченный по времени
+        df_raw = pd.read_csv(feature_store_path)
+        df_raw["timestamp"] = pd.to_datetime(df_raw["timestamp"])
+        df_raw = df_raw.sort_values("timestamp").reset_index(drop=True)
     except FileNotFoundError:
-        print(f"❌ Ошибка: Файл {csv_file} не найден!")
-        sys.exit(1)
-
-    df["timestamp"] = pd.to_datetime(df["timestamp"])
-
-    if df["timestamp"].dt.tz is None:
-        df["timestamp"] = df["timestamp"].dt.tz_localize("UTC")
-    else:
-        df["timestamp"] = df["timestamp"].dt.tz_convert("UTC")
-
-    df = df.sort_values("timestamp").reset_index(drop=True)
-
-    print(f"⏳ Фильтрация скользящего окна: с {start_boundary} по {end_boundary}...")
-
-    # Делаем временной срез данных
-    df_sliced = df[(df["timestamp"] >= start_boundary) & (df["timestamp"] <= end_boundary)].reset_index(drop=True)
-
-    if df_sliced.empty or len(df_sliced) < 100:
-        print(f"❌ Критическая ошибка: в интервале найдено всего {len(df_sliced)} строк! Проверь базу.")
-        return None
-
-    print(f"🎉 Новая качественная выборка нарезана! Размер: {len(df_sliced)} строк.")
-    print(f"📅 Границы выборки: с {df_sliced['timestamp'].min()} по {df_sliced['timestamp'].max()}")
-
-    return df_sliced
-
-
-def train_lgbm(data_file):
-    config = configparser.ConfigParser()
-    config.read("config.ini")
-
-    # Оставляем только один файл модели
-    model_file = config.get("MARKET_DATA", "model_file_prod", fallback="lgbm_market_model.pkl")
-
-    # Вызываем изолированную функцию выборки данных с переданным файлом
-    df = prepare_sliced_dataset(data_file)
-    if df is None:
+        print(f"❌ Критическая ошибка: Feature Store не найден по пути {feature_store_path}")
         return
 
-    # Список фичей
-    feature_cols = [
-        "imbalance_5", "imbalance_20", "imbalance_50",
-        "market_delta_10s", "trade_speed_10s", "speed_zscore",
-        "delta_rolling_2m", "delta_rolling_5m", "imb_20_velocity",
-        "delta_rolling_30m", "delta_rolling_1h", "price_velocity_15m",
-        "speed_ratio_1m", "speed_ratio_5m", "speed_ratio_15m",
-        "cum_delta_1m", "cum_delta_5m", "cum_delta_15m",
-        "price_change_5m", "price_change_1h"
-    ]
+    print(f"⚡ Базовый размер матрицы признаков: {df_raw.shape[0]} строк.")
+    print("---")
 
-    X = df[feature_cols].values
-    y = df["label_next_price"].values + 1  # Сдвиг классов под LightGBM [0, 1, 2]
+    # Итерируемся по каскаду агентов
+    for agent_name, cfg in AGENTS_CONFIG.items():
+        print(f"⚙️ НАЧИНАЮ СБОРКУ МОЗГА ДЛЯ АГЕНТА: [{agent_name}]")
+        print(f"📊 Параметры: Горизонт={cfg['horizon_rows']*10}с | Цель={cfg['target_usdt']} USDT | Шаг={cfg['thinning_step']*10}с")
 
-    tscv = TimeSeriesSplit(n_splits=5)
-    print("🏋️‍♂️ Начинаю кросс-валидацию LightGBM на временных рядах...")
+        # Рабочая копия плотных данных для RAM-разметки на лету
+        df_agent = df_raw.copy()
 
-    params = {
-        "objective": "multiclass",
-        "num_class": 3,
-        "metric": "multi_logloss",
-        "boosting_type": "gbdt",
-        "learning_rate": 0.03,
-        "max_depth": 7,
-        "num_leaves": 45,
-        "verbose": -1,
-        "random_state": 42,
-        "n_jobs": -1
-    }
+        # Шаг 1: Расчет будущих цен строго под персональный горизонт
+        df_agent["future_price"] = df_agent["price"].shift(-cfg["horizon_rows"])
+        df_agent["price_change"] = df_agent["future_price"] - df_agent["price"]
 
-    oof_logloss = []
-    oof_auc = []
-    best_iterations = []
+        # Шаг 2: Трехклассовый динамический лейблинг (0=FLAT, 1=FALL, 2=RISE)
+        conditions = [
+            (df_agent["price_change"] < -cfg["target_usdt"]), # FALL
+            (df_agent["price_change"] > cfg["target_usdt"])   # RISE
+        ]
+        choices = [1, 2]
+        df_agent["label"] = np.select(conditions, choices, default=0)
 
-    # Кросс-валидация идет по всей выборке без искусственного отсечения 80%
-    for fold, (train_idx, test_idx) in enumerate(tscv.split(X)):
-        X_fold_train, X_fold_val = X[train_idx], X[test_idx]
-        y_fold_train, y_fold_val = y[train_idx], y[test_idx]
+        # Очищаем NaN на хвостах, возникшие из-за сдвига look-ahead
+        df_agent = df_agent.dropna(subset=["future_price", "speed_zscore", "imb_20_velocity"]).copy()
 
-        train_data = lgb.Dataset(X_fold_train, label=y_fold_train)
-        valid_data = lgb.Dataset(X_fold_val, label=y_fold_val, reference=train_data)
+        # Шаг 3: Персональное адаптивное прореживание во избежание оверфиттинга окон
+        df_filtered = df_agent.iloc[::cfg["thinning_step"]].reset_index(drop=True)
 
-        model = lgb.train(
-            params,
-            train_data,
-            num_boost_round=1000,
-            valid_sets=[valid_data],
-            callbacks=[lgb.early_stopping(stopping_rounds=30, verbose=False)]
-        )
+        X = df_filtered[FEATURE_COLS].values
+        y = df_filtered["label"].values
 
-        best_iterations.append(model.best_iteration)
-        preds_proba = model.predict(X_fold_val)
+        class_counts = df_filtered["label"].value_counts().to_dict()
+        print(f"📊 Распределение классов в RAM после нарезки: {class_counts}")
 
-        loss = log_loss(y_fold_val, preds_proba, labels=[0, 1, 2])
-        try:
-            auc = roc_auc_score(y_fold_val, preds_proba, multi_class='ovr', labels=[0, 1, 2])
-        except ValueError:
-            auc = np.nan
+        # Настройка параметров LightGBM с жесткой балансировкой весов классов
+        params = {
+            "objective": "multiclass",
+            "num_class": 3,
+            "metric": "multi_logloss",
+            "boosting_type": "gbdt",
+            "class_weight": "balanced",  # Уничтожает проблему '98% FLAT'
+            "learning_rate": 0.03,
+            "max_depth": 5,
+            "num_leaves": 31,
+            "verbose": -1,
+            "random_state": 42,
+            "n_jobs": -1
+        }
 
-        oof_logloss.append(loss)
-        oof_auc.append(auc)
-        print(f"Fold {fold+1} -> LogLoss: {loss:.4f} | AUC: {auc:.4f} | Trees: {model.best_iteration}")
+        # Шаг 4: Хронологическая Валидация на временных рядах
+        tscv = TimeSeriesSplit(n_splits=5)
+        oof_logloss = []
+        oof_auc = []
+        best_iterations = []
 
-    print("\n" + "=" * 50)
-    print(f"🎯 СРЕДНИЙ ROC-AUC (Валидация): {np.nanmean(oof_auc):.4f}")
-    print(f"🎯 СРЕДНИЙ LOGLOSS (Валидация): {np.mean(oof_logloss):.4f}")
-    print("=" * 50)
+        for fold, (train_idx, test_idx) in enumerate(tscv.split(X)):
+            X_train, X_test = X[train_idx], X[test_idx]
+            y_train, y_test = y[train_idx], y[test_idx]
 
-    optimal_trees = int(np.mean(best_iterations))
+            # Страховка от фолдов с вырожденным количеством классов
+            if len(np.unique(y_train)) < 3 or len(np.unique(y_test)) < 3:
+                continue
 
-    print(f"\n🚀 Сборка единой боевой модели на 100% данных (Оптимальное кол-во деревьев: {optimal_trees})...")
-    full_train_data = lgb.Dataset(X, label=y)
-    final_model = lgb.train(params, full_train_data, num_boost_round=optimal_trees)
+            train_data = lgb.Dataset(X_train, label=y_train)
+            valid_data = lgb.Dataset(X_test, label=y_test, reference=train_data)
 
-    joblib.dump(final_model, model_file)
-    # Notify vis Telegram
-    mean_auc = np.nanmean(oof_auc)
-    mean_logloss = np.mean(oof_logloss)
-    min_date = df['timestamp'].min().strftime('%Y-%m-%d %H:%M')
-    max_date = df['timestamp'].max().strftime('%Y-%m-%d %H:%M')
+            model = lgb.train(
+                params,
+                train_data,
+                num_boost_round=1000,
+                valid_sets=[valid_data],
+                callbacks=[lgb.early_stopping(stopping_rounds=30, verbose=False)]
+            )
 
-    # Чистый MarkdownV2 с моноширинным блоком данных
-    alert_text = (
-        "🤖 *MLOps Pipeline: Модель успешно обновлена\\!*\n\n"
-        "\n"
-        f"Период:    c {min_date} по {max_date} UTC\n"
-        f"Выборка:   {len(df):,} строк\n"
-        f"Ансамбль:  {optimal_trees} деревьев\n\n"
-        "Метрики кросс-валидации (5-Fold TSCV):\n"
-        f"• Mean ROC-AUC:  {mean_auc:.4f}\n"
-        f"• Mean LogLoss:  {mean_logloss:.4f}\n\n"
-        "Статус:    Файл .pkl перезаписан на VPS.\n"
-        "\n"
-        "⚙️ `paper_trader.py` переключился на новые веса\\."
-    )
-    send_telegram_alert_sync(alert_text)
-    print(f"💾 Модель '{model_file}' успешно создана и готова к деплою.")
+            best_iterations.append(model.best_iteration)
+            preds_proba = model.predict(X_test)
+
+            loss = log_loss(y_test, preds_proba, labels=[0, 1, 2])
+            try:
+                auc = roc_auc_score(y_test, preds_proba, multi_class='ovr', labels=[0, 1, 2])
+            except ValueError:
+                auc = np.nan
+
+            oof_logloss.append(loss)
+            oof_auc.append(auc)
+
+        # Шаг 5: Обучение финального агента на 100% выделенного контекста
+        optimal_trees = int(np.mean(best_iterations)) if best_iterations else 50
+        print(f"🎯 Валидация завершена. Средний ROC-AUC: {np.nanmean(oof_auc):.4f} | LogLoss: {np.mean(oof_logloss):.4f}")
+        print(f"🚀 Тренирую финальную боевую модель на {optimal_trees} деревьях...")
+
+        full_dataset = lgb.Dataset(X, label=y)
+        final_agent = lgb.train(params, full_dataset, num_boost_round=optimal_trees)
+
+        # Сохранение весов специализированного агента
+        model_filename = f"{models_dir}/lgbm_{agent_name.lower()}.pkl"
+        joblib.dump(final_agent, model_filename)
+        print(f"💾 Веса агента успешно упакованы в: {model_filename}")
+        print("-" * 50)
 
 if __name__ == "__main__":
-    # Проверяем, передан ли аргумент с названием файла при запуске
-    if len(sys.argv) < 2:
-        print("❌ Ошибка запуска. Использование: python lgbm_train.py <путь_к_файлу_с_данными.csv>")
-        sys.exit(1)
 
     target_csv = sys.argv[1]
-    train_lgbm(target_csv)
+    train_cascade_ensemble(target_csv)
