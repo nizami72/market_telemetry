@@ -2,6 +2,7 @@ import os
 import sys
 import joblib
 import warnings
+import configparser
 import numpy as np
 import pandas as pd
 import lightgbm as lgb
@@ -28,10 +29,24 @@ FEATURE_COLS = [
 
 def train_cascade_ensemble(feature_store_path):
     # feature_store_path = "../../data/multidim_market_features.csv"
+
+    # Читаем путь к моделям из config.ini
+    config = configparser.ConfigParser()
+    current_dir = os.path.dirname(os.path.abspath(__file__))
+    config_path = os.path.join(current_dir, "config.ini")
+
     models_dir = "models"
+    if os.path.exists(config_path):
+        config.read(config_path)
+        try:
+            models_dir = config.get("PATH", "models", fallback="models")
+        except Exception as e:
+            print(f"⚠️ Ошибка чтения config.ini ({e}). Использую дефолт 'models'.")
+    else:
+        print(f"⚠️ Файл конфигурации не найден по пути: {config_path}. Использую дефолт 'models'.")
 
     if not os.path.exists(models_dir):
-        os.makedirs(models_dir)
+        os.makedirs(models_dir, exist_ok=True)
 
     print(f"📖 Загружаю плотный Feature Store: {feature_store_path}...")
     try:

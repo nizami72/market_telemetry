@@ -95,6 +95,12 @@ cd ~/projects/python/market_telemetry/data &&
 scp -i ~/.ssh/key2 lgbm_live_model.pkl root@157.180.16.28:/root/projects/market_telemetry
 ```
 
+Upload Models
+```shell
+cd ~/projects/python/market_telemetry/models &&
+scp -i ~/.ssh/key2 * root@157.180.16.28:/root/projects/market_telemetry/models
+```
+
 Upload Logger
 ```shell
 cd ~/projects/python/market_telemetry/src/market_telemetry/prod &&
