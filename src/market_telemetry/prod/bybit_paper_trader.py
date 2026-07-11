@@ -7,7 +7,6 @@ import collections
 import ccxt.pro as ccxt
 import os
 import logging
-import aiohttp
 from telegram_alerts import send_telegram_alert_async
 
 # =====================================================================
@@ -40,7 +39,17 @@ history_buffer = collections.deque(maxlen=360)
 # 3. ДВИЖОК ЭМУЛЯЦИИ ТОРГОВЛИ (PAPER TRADING ENGINE С ПОДДЕРЖКОЙ MUTEX)
 # =====================================================================
 class PaperExecutor:
+    """
+    A class to emulate trading operations (paper trading).
+    Handles balance management, position sizing, and fee calculations.
+    """
     def __init__(self, initial_balance=10000.0, taker_fee=0.0006):
+        """
+        Initializes the paper trading engine.
+
+        :param initial_balance: Starting virtual balance in USDT.
+        :param taker_fee: Taker fee rate (default is Bybit's 0.06%).
+        """
         self.balance = initial_balance
         self.fee_rate = taker_fee  # Комиссия тейкера (0.06%) Bybit
         self.current_position = 0  # 0 = вне рынка, 1 = LONG, -1 = SHORT
@@ -56,7 +65,16 @@ class PaperExecutor:
         logging.info(f"=== РОБОТ ИНИЦИАЛИЗИРОВАН. СТАРТОВЫЙ БАЛАНС: ${self.balance:.2f} ===")
 
     def open_position(self, direction, price, tp_sl_size, risk_per_trade, confidence, agent_name):
-        """Эмуляция открытия позиции с жесткой фиксацией параметров агента"""
+        """
+        Simulates opening a position with fixed parameters.
+
+        :param direction: 1 for LONG, -1 for SHORT.
+        :param price: Entry price.
+        :param tp_sl_size: Size of Take Profit and Stop Loss in USDT.
+        :param risk_per_trade: Percentage of balance to risk per trade.
+        :param confidence: Model's confidence level for the signal.
+        :param agent_name: Name of the agent that triggered the signal.
+        """
         self.current_position = direction
         self.entry_price = price
         self.active_tp_sl = tp_sl_size
@@ -93,7 +111,13 @@ class PaperExecutor:
         asyncio.create_task(send_telegram_alert_async(alert_msg))
 
     def close_position(self, price, action_str, confidence):
-        """Эмуляция закрытия позиции, фиксация PnL и сброс Mutex-блокировки"""
+        """
+        Simulates closing a position, calculates PnL, and resets the state.
+
+        :param price: Exit price.
+        :param action_str: Description of the exit action (e.g., "TAKE_PROFIT").
+        :param confidence: Model's confidence at the time of closing.
+        """
         pnl = 0.0
         if self.current_position == 1:  # LONG
             pnl = (price - self.entry_price) * self.pos_size_btc
@@ -136,6 +160,12 @@ paper_engine = PaperExecutor(initial_balance=10000.0)
 # 4. АСИНХРОННЫЕ СЛУШАТЕЛИ ВЕБ-СОКЕТОВ (CCXT.PRO)
 # =====================================================================
 async def order_book_listener(exchange, symbol):
+    """
+    Asynchronous task to continuously watch the order book via WebSocket.
+
+    :param exchange: CCXT exchange instance.
+    :param symbol: Trading symbol (e.g., "BTC/USDT").
+    """
     global latest_order_book
     while True:
         try:
@@ -145,6 +175,13 @@ async def order_book_listener(exchange, symbol):
             await asyncio.sleep(2)
 
 async def trades_listener(exchange, symbol):
+    """
+    Asynchronous task to continuously watch public trades via WebSocket.
+    Updates global volume and trade count counters.
+
+    :param exchange: CCXT exchange instance.
+    :param symbol: Trading symbol (e.g., "BTC/USDT").
+    """
     global trade_volume_buy_10s, trade_volume_sell_10s, trade_count_10s
     while True:
         try:
@@ -165,18 +202,42 @@ async def trades_listener(exchange, symbol):
 # 5. ПАРАЛЛЕЛЬНЫЙ PREDICT STREAM И ТОРГОВОЕ ЯДРО КАСКАДА С MUTEX
 # =====================================================================
 async def execution_engine(symbol, cascade_models):
+    """
+    Main trading logic loop. Performs feature engineering, monitors active positions,
+    and generates entry signals using a cascade of models.
+
+    :param symbol: Trading symbol.
+    :param cascade_models: Dictionary of loaded LightGBM models.
+    """
     global latest_order_book, trade_volume_buy_10s, trade_volume_sell_10s, trade_count_10s, config, config_path
 
-    # Конфигурация фрактальной матрицы каскада агентов
-    AGENTS_METADATA = {
-        "M15": {"target_usdt": 250.0},
-        "M30": {"target_usdt": 450.0},
-        "M45": {"target_usdt": 600.0},
-        "M60": {"target_usdt": 800.0}
-    }
+    # Читаем конфигурацию агентов из config.ini
+    AGENTS_METADATA = {}
+    try:
+        agents_str = config.get("AGENTS", "list", fallback="M15,M30,M45,M60")
+        agents_list = [a.strip() for a in agents_str.split(",")]
+        for agent in agents_list:
+            target = config.getfloat("AGENTS", f"{agent}_target_usdt", fallback=450.0)
+            AGENTS_METADATA[agent] = {"target_usdt": target}
+    except Exception as e:
+        print(f"⚠️ Ошибка чтения AGENTS_METADATA из config.ini ({e}). Использую хардкод.", flush=True)
+        AGENTS_METADATA = {
+            "M15": {"target_usdt": 250.0},
+            "M30": {"target_usdt": 450.0},
+            "M45": {"target_usdt": 600.0},
+            "M60": {"target_usdt": 800.0}
+        }
 
     print("🚀 Параллельный Predict Stream запущен. Начинаю слушать рынок...", flush=True)
     asyncio.create_task(send_telegram_alert_async("⚡ Cascade Multi-Horizon Paper Trading Engine is ready!"))
+
+    # Читаем глобальные настройки риска из config.ini
+    try:
+        confidence_threshold = config.getfloat("BACKTESTER", "confidence_threshold", fallback=0.55)
+        risk_per_trade = config.getfloat("BACKTESTER", "risk_per_trade", fallback=0.01)
+    except Exception as e:
+        print(f"⚠️ Ошибка чтения config.ini ({e}). Безопасный дефолт.", flush=True)
+        confidence_threshold, risk_per_trade = 0.55, 0.01
 
     while True:
         await asyncio.sleep(10)  # Строгий шаг контура — 10 секунд
@@ -188,16 +249,6 @@ async def execution_engine(symbol, cascade_models):
         if trade_count_10s == 0:
             # Если сделок за 10 секунд не было, просто пропускаем тик, чтобы не делить на ноль
             continue
-
-        # Читаем глобальные настройки риска из config.ini
-        config = configparser.ConfigParser()
-        config.read(config_path)
-        try:
-            confidence_threshold = config.getfloat("BACKTESTER", "confidence_threshold", fallback=0.55)
-            risk_per_trade = config.getfloat("BACKTESTER", "risk_per_trade", fallback=0.01)
-        except Exception as e:
-            print(f"⚠️ Ошибка чтения config.ini ({e}). Безопасный дефолт.", flush=True)
-            confidence_threshold, risk_per_trade = 0.55, 0.01
 
         # Фиксация цен краев стакана (для честной симуляции спреда) и Mid-Price (для признаков)
         current_ask = latest_order_book["asks"][0][0]
@@ -293,10 +344,14 @@ async def execution_engine(symbol, cascade_models):
             continue
 
         # КОНТУР №2: ПАРАЛЛЕЛЬНЫЙ PREDICT STREAM И ДИНАМИЧЕСКИЙ MUTEX ВХОД
+        proba_logs = []
         for agent_name, model in cascade_models.items():
             preds_proba = model.predict(X_live)
             proba_down = preds_proba[0, 1]
             proba_up   = preds_proba[0, 2]
+            proba_stay = preds_proba[0, 0]
+
+            proba_logs.append(f"{agent_name}: [L:{proba_up:.2f} | S:{proba_down:.2f} | N:{proba_stay:.2f}]")
 
             agent_signal = 0
             confidence = 0.0
@@ -316,6 +371,10 @@ async def execution_engine(symbol, cascade_models):
                 )
                 break
 
+        # Pretty log of probabilities
+        log_line = " | ".join(proba_logs)
+        print(f"📊 Probabilities: {log_line}", flush=True)
+
         print(f"[{pd.Timestamp.now().strftime('%H:%M:%S')}] BTC: {current_price:.1f} | Buf: {len(history_buffer)} | Active Pos: {paper_engine.current_position}", flush=True)
 
 
@@ -323,14 +382,34 @@ async def execution_engine(symbol, cascade_models):
 # 6. ТОЧКА ВХОДА В ПРИЛОЖЕНИЕ (EVENT LOOP)
 # =====================================================================
 async def main():
+    """
+    Entry point for the Paper Trader. Initializes models, setup the exchange,
+    and starts asynchronous listeners and the execution engine.
+    """
     # Синхронная предобработка: проверяем веса каскада до запуска сокетов
-    AGENTS_LIST = ["M15", "M30", "M45", "M60"]
+    try:
+        agents_str = config.get("AGENTS", "list", fallback="M15,M30,M45,M60")
+        AGENTS_LIST = [a.strip() for a in agents_str.split(",")]
+    except Exception as e:
+        print(f"⚠️ Ошибка чтения AGENTS_LIST из config.ini ({e}). Использую дефолт.", flush=True)
+        AGENTS_LIST = ["M15", "M30", "M45", "M60"]
+
     cascade_models = {}
 
-    print("🤖 Загрузка каскадного ансамбля моделей LightGBM...", flush=True)
+    try:
+        models_path = config.get("PATH", "models", fallback="../../../models")
+    except Exception as e:
+        print(f"⚠️ Ошибка чтения пути моделей из config.ini ({e}). Использую дефолт.", flush=True)
+        models_path = "../../../models"
+
+    # Если путь относительный, делаем его абсолютным относительно директории скрипта
+    if not os.path.isabs(models_path):
+        models_path = os.path.abspath(os.path.join(current_dir, models_path))
+
+    print(f"🤖 Загрузка каскадного ансамбля моделей LightGBM из: {models_path}", flush=True)
     for agent in AGENTS_LIST:
         model_file = f"lgbm_{agent.lower()}.pkl"
-        model_path = os.path.join(current_dir, "../../../models", model_file)
+        model_path = os.path.join(models_path, model_file)
 
         if not os.path.exists(model_path):
             print(f"❌ КРИТИЧЕСКАЯ ОШИБКА: Веса агента {agent} не найдены по пути: {model_path}", flush=True)
@@ -342,11 +421,15 @@ async def main():
     exchange = ccxt.bybit({"enableRateLimit": True, "options": {"defaultType": "linear"}})
     symbol = "BTC/USDT"
 
-    await asyncio.gather(
-        order_book_listener(exchange, symbol),
-        trades_listener(exchange, symbol),
-        execution_engine(symbol, cascade_models)
-    )
+    try:
+        await asyncio.gather(
+            order_book_listener(exchange, symbol),
+            trades_listener(exchange, symbol),
+            execution_engine(symbol, cascade_models)
+        )
+    finally:
+        await exchange.close()
+        print("🔌 Соединение с биржей закрыто.", flush=True)
 
 if __name__ == "__main__":
     try:

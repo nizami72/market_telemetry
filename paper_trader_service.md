@@ -1,6 +1,10 @@
-Отлично, Nizami! Погнали запускать. Раз уж мы находимся на сервере Hetzner, давай сделаем всё по-взрослому, чтобы ты мог контролировать работу Paper Trader в реальном времени.
+# Paper Traider Sevice
 
-Ниже — пошаговый алгоритм, как развернуть, запустить и мониторить нашего нового демо-робота.
+## Оглавление
+* [Upload paper trader on Hetzner](#upload-paper-trader-on-hetzner)
+* 🚀 [Manual Start](manual-start)
+* 
+___
 
 ### Шаг 1. Upload paper trader on Hetzner
 
@@ -25,7 +29,12 @@ sudo systemctl status bybit-paper.service
 sudo journalctl -u bybit-paper.service -f -n 50
 ```
 
-### 🚀 Шаг 2. Первый тестовый запуск
+### 🚀 Manual Start
+
+
+(venv) root@ubuntu-4gb-hel1-3:~/projects/market_telemetry# cd projects/market_telemetry/
+root@ubuntu-4gb-hel1-3:~/projects/market_telemetry# source venv/bin/activate
+
 Запустим скрипт напрямую через Python, чтобы убедиться, что он успешно импортирует библиотеки, находит модель и подключается к WebSocket:
 
 ```python3 paper_trader.py```
@@ -108,4 +117,8 @@ sudo journalctl -u bybit-paper.service -f -n 50
 tail -f /root/projects/market_telemetry/paper_trading.log
 ```
 
-Система запущена. Журнал сделок чист и готов фиксировать результаты эмуляции. Давай дадим ему пару минут накопиться, проверим через journalctl вывод вероятностей, и контур тестирования перед реальными деньгами можно считать официально открытым!
+### Logs
+
+```
+tail -fn 100 /var/log/bybit/bybit-paper-traider.log
+```
