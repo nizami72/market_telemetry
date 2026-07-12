@@ -122,3 +122,8 @@ tail -f /root/projects/market_telemetry/paper_trading.log
 ```
 tail -fn 100 /var/log/bybit/bybit-paper-traider.log
 ```
+
+#### Download Logs from Bybit to Local Machine
+```shell
+scp -i /home/nizami/.ssh/key2 root@157.180.16.28:/var/log/bybit/bybit-paper-traider.log ~/tmp/logs
+```

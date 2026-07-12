@@ -8,6 +8,7 @@ import pandas as pd
 import lightgbm as lgb
 from sklearn.model_selection import TimeSeriesSplit
 from sklearn.metrics import log_loss, roc_auc_score
+from telegram_alerts import send_telegram_alert_sync
 
 # Отключаем спам-предупреждения LightGBM для чистых логов cron
 warnings.filterwarnings('ignore', category=UserWarning)
@@ -28,7 +29,6 @@ FEATURE_COLS = [
 ]
 
 def train_cascade_ensemble(feature_store_path):
-    # feature_store_path = "../../data/multidim_market_features.csv"
 
     # Читаем путь к моделям из config.ini
     config = configparser.ConfigParser()
@@ -60,6 +60,11 @@ def train_cascade_ensemble(feature_store_path):
 
     print(f"⚡ Базовый размер матрицы признаков: {df_raw.shape[0]} строк.")
     print("---")
+
+    # Переменные для агрегации данных для Telegram-алерта
+    min_date = df_raw["timestamp"].min().strftime('%Y-%m-%d %H:%M')
+    max_date = df_raw["timestamp"].max().strftime('%Y-%m-%d %H:%M')
+    metrics_report = ""
 
     # Итерируемся по каскаду агентов
     for agent_name, cfg in AGENTS_CONFIG.items():
@@ -147,7 +152,10 @@ def train_cascade_ensemble(feature_store_path):
 
         # Шаг 5: Обучение финального агента на 100% выделенного контекста
         optimal_trees = int(np.mean(best_iterations)) if best_iterations else 50
-        print(f"🎯 Валидация завершена. Средний ROC-AUC: {np.nanmean(oof_auc):.4f} | LogLoss: {np.mean(oof_logloss):.4f}")
+        mean_auc = np.nanmean(oof_auc)
+        mean_logloss = np.mean(oof_logloss)
+
+        print(f"🎯 Валидация завершена. Средний ROC-AUC: {mean_auc:.4f} | LogLoss: {mean_logloss:.4f}")
         print(f"🚀 Тренирую финальную боевую модель на {optimal_trees} деревьях...")
 
         full_dataset = lgb.Dataset(X, label=y)
@@ -159,7 +167,30 @@ def train_cascade_ensemble(feature_store_path):
         print(f"💾 Веса агента успешно упакованы в: {model_filename}")
         print("-" * 50)
 
+        # Добавляем данные текущего агента в строку отчета для Telegram
+        metrics_report += f"*{agent_name}* \\({optimal_trees} дер\\.\\):\n"
+        metrics_report += f"• ROC\\-AUC: `{mean_auc:.4f}`\n"
+        metrics_report += f"• LogLoss: `{mean_logloss:.4f}`\n\n"
+
+    # Строим чистый MarkdownV2 с моноширинным блоком и экранированием спецсимволов для Telegram API
+    alert_text = (
+        "🤖 *MLOps Pipeline: Каскад моделей успешно обновлен\\!*\n\n"
+        f"Период:    `c {min_date} по {max_date} UTC`\n"
+        f"Выборка:   `{df_raw.shape[0]:,} строк`\n\n"
+        "📊 *Метрики кросс\\-валидации \\(5\\-Fold TSCV\\):*\n"
+        f"{metrics_report}"
+        "Статус:    Все файлы `lgbm_*.pkl` перезаписаны\\.\n"
+        "⚙️ `paper_trader.py` подхватил новые веса в RAM\\."
+    )
+
+    # Отправляем один синхронный алерт с полным техническим паспортом конвейера
+    send_telegram_alert_sync(alert_text)
+    print(f"💾 Весь ансамбль каскадных моделей успешно сохранен в директорию '{models_dir}'.")
+
 if __name__ == "__main__":
+    if len(sys.argv) < 2:
+        print("❌ Ошибка: не передан путь к CSV Feature Store. Использование: python script.py <path_to_csv>")
+        sys.exit(1)
 
     target_csv = sys.argv[1]
     train_cascade_ensemble(target_csv)
