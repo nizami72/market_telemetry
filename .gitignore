@@ -19,3 +19,4 @@
 /src/market_telemetry/prod/multidim_market_data.csv
 /data/csv_labeled/labeled_data_2026-06.csv
 /data/csv/*_labeled.csv
+__pycache__

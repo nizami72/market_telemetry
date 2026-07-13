@@ -6,8 +6,8 @@ import mplfinance as mpf
 
 def generate_mirror_snapshots():
     market_data_file = "../../data/multidim_market_data.csv"
-    trades_log_file = "../../data/trades_log.csv"
-    output_dir = "signals_snapshots"
+    trades_log_file = "../../../data/trades_log.csv"
+    output_dir = "../signals_snapshots"
 
     # ==========================================
     # 🧹 ШАГ ОЧИСТКИ (CLEAN UP): Удаляем старые рендеры

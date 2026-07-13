@@ -58,7 +58,7 @@ scp -i ~/.ssh/key2 root@157.180.16.28:/root/logger.log ~/Desktop/
 
 /etc/systemd/system/telemetry-logger.service
 
-```
+```ini
 [Unit]
 Description=Market Telemetry Big Data Logger
 After=network.target

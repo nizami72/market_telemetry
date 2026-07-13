@@ -16,7 +16,7 @@ ___
 
 Last file
 ```shell
-scp -i ~/.ssh/key2 root@157.180.16.28:/root/multidim_market_data.csv ~/projects/python/market_telemetry/data/hetzner
+scp -i ~/.ssh/key2 root@157.180.16.28:/root/multidim_market_data.csv ~/projects/python/market_telemetry/data/csv
 ```
 Archives
 ```shell
@@ -93,6 +93,12 @@ Upload model
 ```shell
 cd ~/projects/python/market_telemetry/data &&
 scp -i ~/.ssh/key2 lgbm_live_model.pkl root@157.180.16.28:/root/projects/market_telemetry
+```
+
+Upload Models
+```shell
+cd ~/projects/python/market_telemetry/models &&
+scp -i ~/.ssh/key2 * root@157.180.16.28:/root/projects/market_telemetry/models
 ```
 
 Upload Logger
@@ -184,6 +190,12 @@ sudo journalctl -u bybit-paper.service > alllogs.txt
 Download the log file
 ```bash
 scp -i ~/.ssh/key2 root@157.180.16.28:/root/alllogs.txt ~/logs/
+```
+
+
+Download labeled log file
+```bash
+scp -i ~/.ssh/key2 root@157.180.16.28:/root/multidim_market_labeled.csv ~/projects/python/market_telemetry/data/csv
 ```
 
 

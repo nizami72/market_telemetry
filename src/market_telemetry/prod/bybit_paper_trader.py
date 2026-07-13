@@ -7,7 +7,7 @@ import collections
 import ccxt.pro as ccxt
 import os
 import logging
-import aiohttp  # Добавлен недостающий импорт для работы Telegram
+from telegram_alerts import send_telegram_alert_async
 
 # =====================================================================
 # 1. СИСТЕМНОЕ ЛОГИРОВАНИЕ (ВЫДЕЛЕННЫЙ ЖУРНАЛ СДЕЛКИ)
@@ -19,7 +19,6 @@ logging.basicConfig(
     datefmt='%Y-%m-%d %H:%M:%S'
 )
 
-# Вычисляем пути конфигурации
 current_dir = os.path.dirname(os.path.abspath(__file__))
 config_path = os.path.join(current_dir, "config.ini")
 
@@ -33,69 +32,61 @@ trade_volume_buy_10s = 0.0
 trade_volume_sell_10s = 0.0
 trade_count_10s = 0
 
-# Очередь для расчета скользящих макро-окон прямо в RAM (максимум за 1 час = 360 тиков)
+# Плотная сетка 10-секундных тиков. Максимум за 1 час = 360 тиков (для price_velocity_15m нужно минимум 90)
 history_buffer = collections.deque(maxlen=360)
 
-
 # =====================================================================
-# 2. АСИНХРОННЫЙ ОТПРАВИТЕЛЬ TELEGRAM NOTIFICATION
-# =====================================================================
-async def send_paper_telegram_alert(text: str):
-    """Легковесный асинхронный отправитель алертов"""
-    local_config = configparser.ConfigParser()
-    local_config.read("config.ini")
-
-    try:
-        token = local_config.get("TELEGRAM", "bot_token")
-        chat_id = local_config.get("TELEGRAM", "chat_id")
-    except Exception as e:
-        print(f"⚠️ Ошибка чтения секции [TELEGRAM] в config.ini: {e}")
-        return
-
-    url = f"https://api.telegram.org/bot{token}/sendMessage"
-    payload = {
-        "chat_id": chat_id,
-        "text": text,
-        "parse_mode": "Markdown"
-    }
-
-    try:
-        async with aiohttp.ClientSession() as session:
-            async with session.post(url, json=payload) as response:
-                if response.status != 200:
-                    print(f"⚠️ Ошибка отправки в TG: {response.status}")
-    except Exception as e:
-        print(f"❌ Сбой сети Telegram API: {e}")
-
-
-# =====================================================================
-# 3. ДВИЖОК ЭМУЛЯЦИИ ТОРГОВЛИ (PAPER TRADING ENGINE)
+# 3. ДВИЖОК ЭМУЛЯЦИИ ТОРГОВЛИ (PAPER TRADING ENGINE С ПОДДЕРЖКОЙ MUTEX)
 # =====================================================================
 class PaperExecutor:
+    """
+    A class to emulate trading operations (paper trading).
+    Handles balance management, position sizing, and fee calculations.
+    """
     def __init__(self, initial_balance=10000.0, taker_fee=0.0006):
+        """
+        Initializes the paper trading engine.
+
+        :param initial_balance: Starting virtual balance in USDT.
+        :param taker_fee: Taker fee rate (default is Bybit's 0.06%).
+        """
         self.balance = initial_balance
-        self.fee_rate = taker_fee  # Комиссия тейкера (0.06%)
+        self.fee_rate = taker_fee  # Комиссия тейкера (0.06%) Bybit
         self.current_position = 0  # 0 = вне рынка, 1 = LONG, -1 = SHORT
         self.entry_price = 0.0
         self.pos_size_btc = 0.0
 
-        print(f"\n[INIT] === ИНИЦИАЛИЗАЦИЯ PAPER TRADING ===")
-        print(f"[INIT] Стартовый виртуальный баланс: ${self.balance:.2f} USDT")
+        # Замороженные RAM-уровни текущей сделки (для защиты от внутридневного дрейфа config.ini)
+        self.active_tp_sl = 0.0
+        self.active_agent = None
 
+        print(f"\n[INIT] === ИНИЦИАЛИЗАЦИЯ МУЛЬТИОКАННОГО PAPER TRADING ===")
+        print(f"[INIT] Стартовый виртуальный баланс: ${self.balance:.2f} USDT")
         logging.info(f"=== РОБОТ ИНИЦИАЛИЗИРОВАН. СТАРТОВЫЙ БАЛАНС: ${self.balance:.2f} ===")
 
-    def open_position(self, direction, price, tp_sl_size, risk_per_trade, confidence):
-        """Эмуляция открытия позиции с жестким риск-менеджментом"""
+    def open_position(self, direction, price, tp_sl_size, risk_per_trade, confidence, agent_name):
+        """
+        Simulates opening a position with fixed parameters.
+
+        :param direction: 1 for LONG, -1 for SHORT.
+        :param price: Entry price.
+        :param tp_sl_size: Size of Take Profit and Stop Loss in USDT.
+        :param risk_per_trade: Percentage of balance to risk per trade.
+        :param confidence: Model's confidence level for the signal.
+        :param agent_name: Name of the agent that triggered the signal.
+        """
         self.current_position = direction
         self.entry_price = price
+        self.active_tp_sl = tp_sl_size
+        self.active_agent = agent_name
 
-        # Риск-менеджмент 1% от текущего виртуального баланса
+        # Динамический Position Sizing: строго 1% риска от капитала на сделку
         cash_risk = self.balance * risk_per_trade
         self.pos_size_btc = round(cash_risk / tp_sl_size, 4)
         if self.pos_size_btc == 0:
             self.pos_size_btc = 0.0001
 
-        # Вычитаем комиссию за вход
+        # Списание комиссии за Taker-вход
         fee = (self.entry_price * self.pos_size_btc) * self.fee_rate
         self.balance -= fee
 
@@ -103,35 +94,42 @@ class PaperExecutor:
         tp_price = self.entry_price + tp_sl_size if direction == 1 else self.entry_price - tp_sl_size
         sl_price = self.entry_price - tp_sl_size if direction == 1 else self.entry_price + tp_sl_size
 
-        msg = (f"🟢 [OPEN {pos_str}] | Цена входа: {self.entry_price:.2f} | Лот: {self.pos_size_btc} BTC | "
-               f"Комиссия: ${fee:.4f} | Назначенные цели -> TP: ${tp_price:.1f} | SL: ${sl_price:.1f} | Баланс: ${self.balance:.2f}")
+        msg = (f"🟢 [MUTEX LOCKED BY {agent_name}] | Вход {pos_str}: {self.entry_price:.2f} | Лот: {self.pos_size_btc} BTC | "
+               f"Комиссия: ${fee:.4f} | Цели -> TP: ${tp_price:.1f} | SL: ${sl_price:.1f} | Баланс: ${self.balance:.2f}")
         print(msg)
         logging.info(msg)
 
-        # Формируем красивый алерт для Telegram
         alert_msg = (
-            f"📝 *PAPER TRADING: ВХОД В РЫНОК*\n"
+            f"🎯 *PAPER TRADING: ВХОД В РЫНОК*\n"
+            f"• Агент: `{agent_name}`\n"
             f"• Направление: `{pos_str}`\n"
             f"• Цена входа: `${price:,.2f}`\n"
             f"• Уверенность ИИ: `{confidence * 100:.1f}%`\n"
+            f"• Риск-параметры (TP/SL): `±{tp_sl_size} USDT`\n"
             f"• Виртуальный баланс: `${self.balance:,.2f} USDT`"
         )
-        asyncio.create_task(send_paper_telegram_alert(alert_msg))
+        asyncio.create_task(send_telegram_alert_async(alert_msg))
 
     def close_position(self, price, action_str, confidence):
-        """Эмуляция закрытия позиции и фиксация прибыли/убытка"""
+        """
+        Simulates closing a position, calculates PnL, and resets the state.
+
+        :param price: Exit price.
+        :param action_str: Description of the exit action (e.g., "TAKE_PROFIT").
+        :param confidence: Model's confidence at the time of closing.
+        """
         pnl = 0.0
         if self.current_position == 1:  # LONG
             pnl = (price - self.entry_price) * self.pos_size_btc
         elif self.current_position == -1:  # SHORT
             pnl = (self.entry_price - price) * self.pos_size_btc
 
-        # Вычитаем комиссию за выход
+        # Списание комиссии за Taker-выход
         fee = (price * self.pos_size_btc) * self.fee_rate
         net_pnl = pnl - fee
         self.balance += net_pnl
 
-        msg = (f"🔄 [{action_str}] | Вход: {self.entry_price:.2f} -> Выход: {price:.2f} | "
+        msg = (f"🔓 [MUTEX UNLOCKED] | Агент: {self.active_agent} -> {action_str} | Вход: {self.entry_price:.2f} -> Выход: {price:.2f} | "
                f"Чистый PnL: ${net_pnl:+.4f} | Комиссия: ${fee:.4f} | Новый Баланс: ${self.balance:.2f}")
         print(msg)
         logging.info(msg)
@@ -139,21 +137,22 @@ class PaperExecutor:
         status_icon = "🟢" if net_pnl > 0 else "🔴"
         alert_msg = (
             f"{status_icon} *PAPER TRADING: ЗАКРЫТИЕ ПОЗИЦИИ*\n"
-            f"• Результат: `{action_str}`\n"
+            f"• Агент: `{self.active_agent}`\n"
+            f"• Исход: `{action_str}`\n"
             f"• Цена выхода: `${price:,.2f}`\n"
             f"• Финансовый итог: `{net_pnl:+.2f} USDT`\n"
-            f"• Уверенность ИИ в моменте: `{confidence * 100:.1f}%`\n"
             f"• Текущий баланс: `${self.balance:,.2f} USDT`"
         )
-        asyncio.create_task(send_paper_telegram_alert(alert_msg))
+        asyncio.create_task(send_telegram_alert_async(alert_msg))
 
-        # Сброс параметров позиции после отправки алерта
+        # Полное освобождение Mutex-ресурсов для каскада
         self.current_position = 0
         self.entry_price = 0.0
         self.pos_size_btc = 0.0
+        self.active_tp_sl = 0.0
+        self.active_agent = None
 
 
-# Инициализация виртуального движка торговли
 paper_engine = PaperExecutor(initial_balance=10000.0)
 
 
@@ -161,6 +160,12 @@ paper_engine = PaperExecutor(initial_balance=10000.0)
 # 4. АСИНХРОННЫЕ СЛУШАТЕЛИ ВЕБ-СОКЕТОВ (CCXT.PRO)
 # =====================================================================
 async def order_book_listener(exchange, symbol):
+    """
+    Asynchronous task to continuously watch the order book via WebSocket.
+
+    :param exchange: CCXT exchange instance.
+    :param symbol: Trading symbol (e.g., "BTC/USDT").
+    """
     global latest_order_book
     while True:
         try:
@@ -170,6 +175,13 @@ async def order_book_listener(exchange, symbol):
             await asyncio.sleep(2)
 
 async def trades_listener(exchange, symbol):
+    """
+    Asynchronous task to continuously watch public trades via WebSocket.
+    Updates global volume and trade count counters.
+
+    :param exchange: CCXT exchange instance.
+    :param symbol: Trading symbol (e.g., "BTC/USDT").
+    """
     global trade_volume_buy_10s, trade_volume_sell_10s, trade_count_10s
     while True:
         try:
@@ -187,47 +199,63 @@ async def trades_listener(exchange, symbol):
 
 
 # =====================================================================
-# 5. ТОРГОВОЕ ЯДРО С РАСЧЕТОМ ФИЧЕЙ И МОДЕЛЬЮ
+# 5. ПАРАЛЛЕЛЬНЫЙ PREDICT STREAM И ТОРГОВОЕ ЯДРО КАСКАДА С MUTEX
 # =====================================================================
-async def execution_engine(symbol):
-    global latest_order_book, trade_volume_buy_10s, trade_volume_sell_10s, trade_count_10s, config, current_dir, config_path
+async def execution_engine(symbol, cascade_models):
+    """
+    Main trading logic loop. Performs feature engineering, monitors active positions,
+    and generates entry signals using a cascade of models.
 
-    # Автоматический расчет пути к модели весов ИИ
-    model_name = config.get("MARKET_DATA", "model_file_prod", fallback="../../../data/lgbm_live_model.pkl")
-    model_path = os.path.join(current_dir, model_name)
+    :param symbol: Trading symbol.
+    :param cascade_models: Dictionary of loaded LightGBM models.
+    """
+    global latest_order_book, trade_volume_buy_10s, trade_volume_sell_10s, trade_count_10s, config, config_path
 
-    print(f"🤖 Загружаю модель ИИ из: {model_path}...")
-    if not os.path.exists(model_path):
-        raise FileNotFoundError(f"❌ КРИТИЧЕСКАЯ ОШИБКА: Файл модели {model_name} не найден по пути: {model_path}!")
+    # Читаем конфигурацию агентов из config.ini
+    AGENTS_METADATA = {}
+    try:
+        agents_str = config.get("AGENTS", "list", fallback="M15,M30,M45,M60")
+        agents_list = [a.strip() for a in agents_str.split(",")]
+        for agent in agents_list:
+            target = config.getfloat("AGENTS", f"{agent}_target_usdt", fallback=450.0)
+            AGENTS_METADATA[agent] = {"target_usdt": target}
+    except Exception as e:
+        print(f"⚠️ Ошибка чтения AGENTS_METADATA из config.ini ({e}). Использую хардкод.", flush=True)
+        AGENTS_METADATA = {
+            "M15": {"target_usdt": 250.0},
+            "M30": {"target_usdt": 450.0},
+            "M45": {"target_usdt": 600.0},
+            "M60": {"target_usdt": 800.0}
+        }
 
-    model = joblib.load(model_path)
-    print("🚀 Виртуальный торговый движок запущен и ждет наполнения RAM-буфера...")
-    print(f"\n[INIT] === SENDING TELEGRAM NOTIFICATION ===")
-    asyncio.create_task(send_paper_telegram_alert("The paper trading engine is ready!"))
+    print("🚀 Параллельный Predict Stream запущен. Начинаю слушать рынок...", flush=True)
+    asyncio.create_task(send_telegram_alert_async("⚡ Cascade Multi-Horizon Paper Trading Engine is ready!"))
+
+    # Читаем глобальные настройки риска из config.ini
+    try:
+        confidence_threshold = config.getfloat("BACKTESTER", "confidence_threshold", fallback=0.55)
+        risk_per_trade = config.getfloat("BACKTESTER", "risk_per_trade", fallback=0.01)
+    except Exception as e:
+        print(f"⚠️ Ошибка чтения config.ini ({e}). Безопасный дефолт.", flush=True)
+        confidence_threshold, risk_per_trade = 0.55, 0.01
 
     while True:
-        await asyncio.sleep(10)  # Сетка — 10 секунд
+        await asyncio.sleep(10)  # Строгий шаг контура — 10 секунд
 
-        if latest_order_book is None or trade_count_10s == 0:
+        if latest_order_book is None:
+            print("⏳ Ожидаю первое обновление стакана (WebSocket)...", flush=True)
             continue
 
-        # Читаем конфигурацию на лету (подхватываем Штиль/Шторм от market_regime.py)
-        config = configparser.ConfigParser()
-        config.read(config_path)
-        try:
-            threshold = config.getfloat("BACKTESTER", "confidence_threshold")
-            tp_sl_size = config.getfloat("BACKTESTER", "tp_sl_size")
-            risk_per_trade = config.getfloat("BACKTESTER", "risk_per_trade")
-        except Exception as e:
-            print(f"⚠️ Ошибка чтения config.ini ({e}). Безопасный режим.")
-            threshold, tp_sl_size, risk_per_trade = 0.42, 450.0, 0.01
+        if trade_count_10s == 0:
+            # Если сделок за 10 секунд не было, просто пропускаем тик, чтобы не делить на ноль
+            continue
 
-        # Ловим лучшие цены Аск/Бид и Спред
+        # Фиксация цен краев стакана (для честной симуляции спреда) и Mid-Price (для признаков)
         current_ask = latest_order_book["asks"][0][0]
         current_bid = latest_order_book["bids"][0][0]
         current_price = (current_ask + current_bid) / 2
 
-        # Расчет базовых тиковых дисбалансов
+        # Расчет мгновенных характеристик стакана и ленты
         def calc_imbalance(depth):
             b_depth = sum([p * v for p, v in latest_order_book["bids"][:depth]])
             a_depth = sum([p * v for p, v in latest_order_book["asks"][:depth]])
@@ -235,29 +263,28 @@ async def execution_engine(symbol):
 
         imb_5 = calc_imbalance(5)
         imb_20 = calc_imbalance(20)
-        imb_50 = calc_imbalance(50)
+        imb_50 = calc_imbalance(depth=50)
         market_delta = trade_volume_buy_10s - trade_volume_sell_10s
         speed = trade_count_10s
 
-        # Очищаем буфер для следующего физического кванта времени
+        # Мгновенный сброс накопителей под следующий 10-секундный квант
         trade_volume_buy_10s = 0.0
         trade_volume_sell_10s = 0.0
         trade_count_10s = 0
 
-        # Сохраняем срез в оперативную память истории
+        # Аппендим срез в RAM-буфер истории
         current_tick = {
             "price": current_price, "imbalance_5": imb_5, "imbalance_20": imb_20, "imbalance_50": imb_50,
             "market_delta_10s": market_delta, "trade_speed_10s": speed
         }
         history_buffer.append(current_tick)
 
-        if len(history_buffer) < 30:
-            print(f"⏳ Накапливаю RAM-буфер истории для расчета макро-фич... ({len(history_buffer)}/30)")
+        # Минимальный порог плотности для расчета price_velocity_15m (90 тиков * 10с = 15 минут)
+        if len(history_buffer) < 90:
+            print(f"⏳ Накапливаю RAM-буфер истории макро-окон... ({len(history_buffer)}/90)", flush=True)
             continue
 
-        # -----------------------------------------------------------------
-        # FEATURE ENGINEERING НА ЛЕТУ В ОПЕРАТИВНОЙ ПАМЯТИ
-        # -----------------------------------------------------------------
+        # COMPUTE FEATURE ENGINEERING
         df_buf = pd.DataFrame(list(history_buffer))
 
         r_speed = df_buf["trade_speed_10s"].tail(30)
@@ -267,120 +294,145 @@ async def execution_engine(symbol):
 
         delta_rolling_2m = df_buf["market_delta_10s"].tail(12).sum()
         delta_rolling_5m = df_buf["market_delta_10s"].tail(30).sum()
-        imb_20_velocity = imb_20 - df_buf["imbalance_20"].iloc[-7] if len(df_buf) >= 7 else 0.0
+        imb_20_velocity = imb_20 - df_buf["imbalance_20"].iloc[-7]
 
-        delta_rolling_30m = df_buf["market_delta_10s"].tail(180).sum() if len(df_buf) >= 180 else df_buf["market_delta_10s"].sum()
+        delta_rolling_30m = df_buf["market_delta_10s"].tail(180).sum()
         delta_rolling_1h = df_buf["market_delta_10s"].sum()
-        price_velocity_15m = current_price - df_buf["price"].iloc[-90] if len(df_buf) >= 90 else current_price - df_buf["price"].iloc[0]
+        price_velocity_15m = current_price - df_buf["price"].iloc[-90]
 
-        speed_ratio_1m = speed / (df_buf["trade_speed_10s"].tail(6).mean() + 1e-5)
-        speed_ratio_5m = speed / (df_buf["trade_speed_10s"].tail(30).mean() + 1e-5)
-        speed_ratio_15m = speed / (df_buf["trade_speed_10s"].tail(90).mean() + 1e-5)
-
-        cum_delta_1m = df_buf["market_delta_10s"].tail(6).sum()
-        cum_delta_5m = df_buf["market_delta_10s"].tail(30).sum()
-        cum_delta_15m = df_buf["market_delta_10s"].tail(90).sum()
-
-        price_change_5m = current_price - df_buf["price"].iloc[-30] if len(df_buf) >= 30 else 0.0
-        price_change_1h = current_price - df_buf["price"].iloc[0]
-
-        # Строго соблюдаем порядок признаков обучения LightGBM
         X_live = np.array([[
             imb_5, imb_20, imb_50, market_delta, speed, speed_zscore,
             delta_rolling_2m, delta_rolling_5m, imb_20_velocity,
-            delta_rolling_30m, delta_rolling_1h, price_velocity_15m,
-            speed_ratio_1m, speed_ratio_5m, speed_ratio_15m,
-            cum_delta_1m, cum_delta_5m, cum_delta_15m,
-            price_change_5m, price_change_1h
+            delta_rolling_30m, delta_rolling_1h, price_velocity_15m
         ]])
 
-        # ПОЛУЧЕНИЕ ПРОГНОЗА МОДЕЛИ
-        preds_proba = model.predict(X_live)
-        proba_down = preds_proba[0, 0]
-        proba_flat = preds_proba[0, 1]
-        proba_up   = preds_proba[0, 2]
-
-        signal = 0
-        current_confidence = 0.0
-        if proba_up > threshold:
-            signal = 1
-            current_confidence = proba_up
-        elif proba_down > threshold:
-            signal = -1
-            current_confidence = proba_down
-
-        # -----------------------------------------------------------------
-        # СКВОЗНАЯ СИМУЛЯЦИЯ КОНТУРА ВЫХОДОВ И ВХОДОВ (Зеркально живому боту)
-        # -----------------------------------------------------------------
+        # КОНТУР №1: ТЕКУЩЕЕ СОСТОЯНИЕ И МОНИТОРИНГ УДЕРЖАНИЯ ОРДЕРА
         if paper_engine.current_position != 0:
             is_closed = False
             action_label = ""
             execution_price = current_price
+            frozen_targets = paper_engine.active_tp_sl
 
-            if paper_engine.current_position == 1:  # Находимся в виртуальном LONG
+            if paper_engine.current_position == 1:
                 change = current_price - paper_engine.entry_price
-                if change >= tp_sl_size:
-                    execution_price = paper_engine.entry_price + tp_sl_size
+                if change >= frozen_targets:
+                    execution_price = paper_engine.entry_price + frozen_targets
                     action_label = "TAKE_PROFIT LONG"
                     is_closed = True
-                elif change <= -tp_sl_size:
-                    execution_price = paper_engine.entry_price - tp_sl_size
+                elif change <= -frozen_targets:
+                    execution_price = paper_engine.entry_price - frozen_targets
                     action_label = "STOP_LOSS LONG"
                     is_closed = True
-                elif signal == -1:
-                    execution_price = current_bid  # Закрываемся по цене спроса
-                    action_label = "REVERSE CLOSE LONG"
-                    is_closed = True
 
-            elif paper_engine.current_position == -1:  # Находимся в виртуальном SHORT
+            elif paper_engine.current_position == -1:
                 change = paper_engine.entry_price - current_price
-                if change >= tp_sl_size:
-                    execution_price = paper_engine.entry_price - tp_sl_size
+                if change >= frozen_targets:
+                    execution_price = paper_engine.entry_price - frozen_targets
                     action_label = "TAKE_PROFIT SHORT"
                     is_closed = True
-                elif change <= -tp_sl_size:
-                    execution_price = paper_engine.entry_price + tp_sl_size
+                elif change <= -frozen_targets:
+                    execution_price = paper_engine.entry_price + frozen_targets
                     action_label = "STOP_LOSS SHORT"
-                    is_closed = True
-                elif signal == 1:
-                    execution_price = current_ask  # Выкупаем по цене предложения
-                    action_label = "REVERSE CLOSE SHORT"
                     is_closed = True
 
             if is_closed:
-                # Передаем уверенность ИИ на момент закрытия (для алертов)
-                closing_conf = proba_down if paper_engine.current_position == 1 else proba_up
+                active_model = cascade_models[paper_engine.active_agent]
+                exit_proba = active_model.predict(X_live)
+                closing_conf = exit_proba[0, 1] if paper_engine.current_position == -1 else exit_proba[0, 2]
                 paper_engine.close_position(execution_price, action_label, closing_conf)
-                continue
 
-        # Логика виртуального входа (только вне рынка)
-        if paper_engine.current_position == 0 and signal != 0:
-            # На демо-счете входим строго по Аску для LONG или по Биду для SHORT (честный спред!)
-            entry_price_side = current_ask if signal == 1 else current_bid
-            paper_engine.open_position(signal, entry_price_side, tp_sl_size, risk_per_trade, current_confidence)
+            continue
 
-        # Журналирование текущего состояния в консоль сервера
-        print(f"[{pd.Timestamp.now().strftime('%H:%M:%S')}] Цена: {current_price:.1f} | "
-              f"U/F/D: {proba_up:.2f}/{proba_flat:.2f}/{proba_down:.2f} | Сигнал: {signal} | Вирт_Поз: {paper_engine.current_position}")
+        # КОНТУР №2: ПАРАЛЛЕЛЬНЫЙ PREDICT STREAM И ДИНАМИЧЕСКИЙ MUTEX ВХОД
+        proba_logs = []
+        for agent_name, model in cascade_models.items():
+            preds_proba = model.predict(X_live)
+            proba_down = preds_proba[0, 1]
+            proba_up   = preds_proba[0, 2]
+            proba_stay = preds_proba[0, 0]
+
+            proba_logs.append(f"{agent_name}: [L:{proba_up:.2f} | S:{proba_down:.2f} | N:{proba_stay:.2f}]")
+
+            agent_signal = 0
+            confidence = 0.0
+            if proba_up > confidence_threshold:
+                agent_signal = 1
+                confidence = proba_up
+            elif proba_down > confidence_threshold:
+                agent_signal = -1
+                confidence = proba_down
+
+            if agent_signal != 0:
+                target_usdt = AGENTS_METADATA[agent_name]["target_usdt"]
+                entry_price_side = current_ask if agent_signal == 1 else current_bid
+                paper_engine.open_position(
+                    direction=agent_signal, price=entry_price_side, tp_sl_size=target_usdt,
+                    risk_per_trade=risk_per_trade, confidence=confidence, agent_name=agent_name
+                )
+                break
+
+        # Pretty log of probabilities
+        log_line = " | ".join(proba_logs)
+        print(f"📊 Probabilities: {log_line}", flush=True)
+
+        print(f"[{pd.Timestamp.now().strftime('%H:%M:%S')}] BTC: {current_price:.1f} | Buf: {len(history_buffer)} | Active Pos: {paper_engine.current_position}", flush=True)
 
 
 # =====================================================================
-# 6. ТОЧКА ВХОДА В ПРИЛОЖЕНИЕ
+# 6. ТОЧКА ВХОДА В ПРИЛОЖЕНИЕ (EVENT LOOP)
 # =====================================================================
 async def main():
-    # Используем публичное WebSocket-подключение без ключей для эмуляции
+    """
+    Entry point for the Paper Trader. Initializes models, setup the exchange,
+    and starts asynchronous listeners and the execution engine.
+    """
+    # Синхронная предобработка: проверяем веса каскада до запуска сокетов
+    try:
+        agents_str = config.get("AGENTS", "list", fallback="M15,M30,M45,M60")
+        AGENTS_LIST = [a.strip() for a in agents_str.split(",")]
+    except Exception as e:
+        print(f"⚠️ Ошибка чтения AGENTS_LIST из config.ini ({e}). Использую дефолт.", flush=True)
+        AGENTS_LIST = ["M15", "M30", "M45", "M60"]
+
+    cascade_models = {}
+
+    try:
+        models_path = config.get("PATH", "models", fallback="../../../models")
+    except Exception as e:
+        print(f"⚠️ Ошибка чтения пути моделей из config.ini ({e}). Использую дефолт.", flush=True)
+        models_path = "../../../models"
+
+    # Если путь относительный, делаем его абсолютным относительно директории скрипта
+    if not os.path.isabs(models_path):
+        models_path = os.path.abspath(os.path.join(current_dir, models_path))
+
+    print(f"🤖 Загрузка каскадного ансамбля моделей LightGBM из: {models_path}", flush=True)
+    for agent in AGENTS_LIST:
+        model_file = f"lgbm_{agent.lower()}.pkl"
+        model_path = os.path.join(models_path, model_file)
+
+        if not os.path.exists(model_path):
+            print(f"❌ КРИТИЧЕСКАЯ ОШИБКА: Веса агента {agent} не найдены по пути: {model_path}", flush=True)
+            return
+
+        cascade_models[agent] = joblib.load(model_path)
+        print(f"  -> Агент [{agent}] успешно развернут в RAM.", flush=True)
+
     exchange = ccxt.bybit({"enableRateLimit": True, "options": {"defaultType": "linear"}})
     symbol = "BTC/USDT"
 
-    # Запускаем сбор и эмуляцию в едином Event Loop
-    await asyncio.gather(
-        order_book_listener(exchange, symbol),
-        trades_listener(exchange, symbol),
-        execution_engine(symbol)
-    )
+    try:
+        await asyncio.gather(
+            order_book_listener(exchange, symbol),
+            trades_listener(exchange, symbol),
+            execution_engine(symbol, cascade_models)
+        )
+    finally:
+        await exchange.close()
+        print("🔌 Соединение с биржей закрыто.", flush=True)
 
 if __name__ == "__main__":
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
-        print("\n🛑 Робот Paper Trader остановлен пользователем.")
+        print("\n🛑 Робот Paper Trader остановлен пользователем.", flush=True)

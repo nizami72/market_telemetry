@@ -1,44 +1,32 @@
 import os
 import sys
 import polars as pl
-import configparser
 from market_regime import detect_and_save_market_regime
 
 
 def make_impulse_time_machine(csv_file_row_data):
-    current_dir = os.path.dirname(os.path.abspath(__file__))
-    config_path = os.path.join(current_dir, "config.ini")
-
-    config = configparser.ConfigParser()
-    config.read(config_path, encoding="utf-8")
-
-    look_ahead = config.getint("LABELER", "look_ahead")
-
-    # ==========================================
-    # 🧠 Update config file
-    # ==========================================
+    # =====================================================================
+    # 🧠 ДИНАМИЧЕСКИЙ АПДЕЙТ ВОЛАТИЛЬНОСТИ
+    # =====================================================================
+    # Разметчик сам инициирует перерасчет режима рынка ("Штиль"/"Шторм")
+    # и обновляет config.ini на диске для контура обучения моделей.
     detect_and_save_market_regime(24)
-    config.read(config_path, encoding="utf-8") # Перечитываем апдейты!
+    # =====================================================================
 
-    # 🔧 Получаем динамические параметры
-    noise_threshold = config.getfloat("LABELER", "noise_threshold")
-    thinning_step = config.getint("LABELER", "data_thinning_step")
-    # ==========================================
-
-    # Динамически формируем имя итогового файла с постфиксом _test
+    # Динамически формируем имя итогового Feature Store файла
     base_name, _ = os.path.splitext(csv_file_row_data)
-    csv_file_labeled_data = f"{base_name}_labeled.csv"
+    csv_file_features_store = f"{base_name}_features.csv"
+
 
     print(f"📖 Читаем сырой файл {csv_file_row_data}...")
     try:
-        # В Polars чтение CSV происходит молниеносно
         df = pl.read_csv(csv_file_row_data)
     except FileNotFoundError:
         print(f"❌ Файл не найден по пути: {csv_file_row_data}")
         return
 
     if df.height < 50:
-        print("❌ Мало данных.")
+        print("❌ Недостаточно данных для расчета.")
         return
 
     # ==========================================
@@ -46,10 +34,8 @@ def make_impulse_time_machine(csv_file_row_data):
     # ==========================================
     print("⚙️ Выравниваю временную сетку в жестком формате UTC...")
 
-    # В Polars операции делаются через .with_columns() и выражения
     df = (
         df.with_columns(
-            # Жестко парсим строку в дату с таймзоной UTC
             pl.col("timestamp").str.to_datetime(time_zone="UTC")
         )
         .sort("timestamp")
@@ -64,97 +50,65 @@ def make_impulse_time_machine(csv_file_row_data):
     )
 
     # ==========================================
-    # 🧪 FEATURE ENGINEERING (КОНТЕКСТ НА СКОРОСТИ RUST)
+    # 🧪 FEATURE ENGINEERING (СЛОЙ ВЫЧИСЛЕНИЙ)
     # ==========================================
-    print("⚙️ Генерирую расширенные фичи объемов и окон...")
+    print("⚙️ Генерирую расширенные фичи объемов и окон на скорости Rust...")
 
-    # Скользящие окна в Polars пишутся через rolling_mean/rolling_std
     df = df.with_columns([
-        pl.col("trade_speed_10s").rolling_mean(window_size=30, min_periods=5).alias("speed_mean"),
-        pl.col("trade_speed_10s").rolling_std(window_size=30, min_periods=5).alias("speed_std"),
+        pl.col("trade_speed_10s").rolling_mean(window_size=30, min_samples=5).alias("speed_mean"),
+        pl.col("trade_speed_10s").rolling_std(window_size=30, min_samples=5).alias("speed_std"),
     ]).with_columns([
-        # Расчет z-score
         ((pl.col("trade_speed_10s") - pl.col("speed_mean")) / pl.col("speed_std"))
         .fill_nan(0.0)
         .fill_null(0.0)
         .alias("speed_zscore")
     ])
 
-    # Основной пул фичей через мощный механизм выражений Polars (выполняется параллельно!)
+    # Основной пул фичей через параллельный движок выражений Polars
     df = df.with_columns([
-        pl.col("market_delta_10s").rolling_sum(12, min_periods=3).fill_null(0).alias("delta_rolling_2m"),
-        pl.col("market_delta_10s").rolling_sum(30, min_periods=5).fill_null(0).alias("delta_rolling_5m"),
+        pl.col("market_delta_10s").rolling_sum(12, min_samples=3).fill_null(0).alias("delta_rolling_2m"),
+        pl.col("market_delta_10s").rolling_sum(30, min_samples=5).fill_null(0).alias("delta_rolling_5m"),
         (pl.col("imbalance_20") - pl.col("imbalance_20").shift(6)).fill_null(0).alias("imb_20_velocity"),
 
-        pl.col("market_delta_10s").rolling_sum(180, min_periods=30).fill_null(0).alias("delta_rolling_30m"),
-        pl.col("market_delta_10s").rolling_sum(360, min_periods=60).fill_null(0).alias("delta_rolling_1h"),
+        pl.col("market_delta_10s").rolling_sum(180, min_samples=30).fill_null(0).alias("delta_rolling_30m"),
+        pl.col("market_delta_10s").rolling_sum(360, min_samples=60).fill_null(0).alias("delta_rolling_1h"),
         (pl.col("price") - pl.col("price").shift(90)).fill_null(0).alias("price_velocity_15m"),
     ])
 
     # Высокочастотные фичи ускорения объемов
     df = df.with_columns([
-        (pl.col("trade_speed_10s") / (pl.col("trade_speed_10s").rolling_mean(6, min_periods=1) + 1e-5)).alias("speed_ratio_1m"),
-        (pl.col("trade_speed_10s") / (pl.col("trade_speed_10s").rolling_mean(30, min_periods=1) + 1e-5)).alias("speed_ratio_5m"),
-        (pl.col("trade_speed_10s") / (pl.col("trade_speed_10s").rolling_mean(90, min_periods=1) + 1e-5)).alias("speed_ratio_15m"),
+        (pl.col("trade_speed_10s") / (pl.col("trade_speed_10s").rolling_mean(6, min_samples=1) + 1e-5)).alias("speed_ratio_1m"),
+        (pl.col("trade_speed_10s") / (pl.col("trade_speed_10s").rolling_mean(30, min_samples=1) + 1e-5)).alias("speed_ratio_5m"),
+        (pl.col("trade_speed_10s") / (pl.col("trade_speed_10s").rolling_mean(90, min_samples=1) + 1e-5)).alias("speed_ratio_15m"),
 
-        pl.col("market_delta_10s").rolling_sum(6, min_periods=1).fill_null(0).alias("cum_delta_1m"),
-        pl.col("market_delta_10s").rolling_sum(30, min_periods=1).fill_null(0).alias("cum_delta_5m"),
-        pl.col("market_delta_10s").rolling_sum(90, min_periods=1).fill_null(0).alias("cum_delta_15m"),
+        pl.col("market_delta_10s").rolling_sum(6, min_samples=1).fill_null(0).alias("cum_delta_1m"),
+        pl.col("market_delta_10s").rolling_sum(30, min_samples=1).fill_null(0).alias("cum_delta_5m"),
+        pl.col("market_delta_10s").rolling_sum(90, min_samples=1).fill_null(0).alias("cum_delta_15m"),
 
         (pl.col("price") - pl.col("price").shift(30)).fill_null(0).alias("price_change_5m"),
         (pl.col("price") - pl.col("price").shift(360)).fill_null(0).alias("price_change_1h"),
     ])
 
-    # Дропаем временные колонки средних, они больше не нужны
+    # Дропаем служебные колонки средних
     df = df.drop(["speed_mean", "speed_std"])
 
-    # ==========================================
-    # ⚡ ДИНАМИЧЕСКАЯ ИМПУЛЬСНАЯ РАЗМЕТКА
-    # ==========================================
-    df = df.with_columns([
-        pl.col("price").shift(-look_ahead).alias("future_price")
-    ]).with_columns([
-        (pl.col("future_price") - pl.col("price")).alias("price_change")
-    ])
-
-    # Аналог np.select в Polars — это конструкция pl.when().then().otherwise()
-    df = df.with_columns(
-        pl.when(pl.col("price_change") > noise_threshold).then(1)
-        .when(pl.col("price_change") < -noise_threshold).then(-1)
-        .otherwise(0)
-        .alias("label_next_price")
-    )
-
-    # Запоминаем размер до очистки строк
+    # Запоминаем размер до удаления краевых нуллов
     len_before_drop = df.height
 
-    # Очищаем строки с нуллами в ключевых колонках (после shift)
-    df_cleaned = df.drop_nulls(subset=["future_price", "imb_20_velocity", "speed_zscore"])
+    # 🎯 Очищаем нуллы только на «прогревочном» старте фичей (первые скользящие окна)
+    df_clean = df.drop_nulls(subset=["imb_20_velocity", "speed_zscore"])
+    df_clean = df_clean.filter(pl.col("price").is_not_null() & pl.col("timestamp").is_not_null())
 
-    # 🎯 ФИКС: Убираем пустые строки, которые вылезли в самом начале файла
-    df_cleaned = df_cleaned.filter(pl.col("price").is_not_null() & pl.col("timestamp").is_not_null())
+    # 🔥 ФИНАЛЬНОЕ СОХРАНЕНИЕ: Плотный, непрерывный Feature Store готов!
+    df_clean.write_csv(csv_file_features_store)
 
-    # Разрежение сетки (аналог iloc[::thinning_step]) через метод gather_every
-    df_filtered = df_cleaned.gather_every(thinning_step)
-
-    # Удаляем ненужные для ИИ колонки
-    df_filtered = df_filtered.drop(["future_price", "price_change"])
-
-    # Сохраняем итоговый файл (название сформировано с постфиксом _test)
-    df_filtered.write_csv(csv_file_labeled_data)
-
-    print(f"🎉 Новая импульсная разметка на Polars завершена!")
-    print(f"💾 Файл успешно сохранен по пути: {csv_file_labeled_data}")
-    print(f"🗑️ Было строк до фильтрации:                                         {len_before_drop}")
-    print(f"🎯 Итоговый размер датасета для ИИ (включая флэт-паттерны):         {df_filtered.height}")
-
-    # Считаем баланс классов
-    class_counts = df_filtered["label_next_price"].value_counts()
-    print(f"📊 Баланс классов:\n{class_counts}")
+    print(f"🎉 Сборка Feature Store на Polars успешно завершена!")
+    print(f"💾 База признаков сохранена по пути: {csv_file_features_store}")
+    print(f"📊 Исходных строк в логе:             {len_before_drop}")
+    print(f"📊 Доступно чистых строк для ИИ:       {df_clean.height}")
 
 
 if __name__ == "__main__":
-    # Проверяем, передан ли аргумент с названием файла при запуске
     if len(sys.argv) < 2:
         print("❌ Ошибка запуска. Использование: python multidim_labeler.py <путь_к_сырому_файлу.csv>")
         sys.exit(1)
